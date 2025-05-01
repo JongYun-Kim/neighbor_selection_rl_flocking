@@ -1,0 +1,4 @@
+control:
+
+env:
+  num_agents_pool: [20]  # Must be specified
