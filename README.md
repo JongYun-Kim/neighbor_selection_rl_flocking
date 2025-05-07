@@ -2,10 +2,10 @@
 
 ## TODOs
 - [ ] Re-configure/clone files
-  - [ ] Env: get it from lazy-message-listener-flocking
-  - [ ] Model: get it from lazy-message-listener-flocking
-  - [ ] Model: and update the names and clean it up
-  - [ ] Model: update it to be able to use address arbitrary numbers
+  - [x] Env: get it from lazy-message-listener-flocking
+  - [x] Model: get it from lazy-message-listener-flocking
+  - [x] Model: and update the names and clean it up
+  - [x] Model: update it to be able to use address arbitrary numbers
   - [ ] CustomActors: create a template for heuristics
     - [ ] Distance-based (disc model)
     - [ ] Topology-based
