@@ -22,6 +22,13 @@ class ControlConfig(BaseModel):
     speed: float = 15.0  # Speed in m/s.
     max_turn_rate: float = 1e3  # Maximum turn rate in rad/s.
     initial_position_bound: float = 250.0  # Initial position bound in meters.
+    # ACS specific controls
+    beta: float = 1./3.  # communication decay rate
+    lam: float =  5.  # inter agent strength
+    sig: float = 1.  # bonding strength
+    k1: float = 1.
+    k2: float = 3.
+    r0: float = 60.  # predefined (almost-)desired distance
 
 
 class EnvConfig(BaseModel):
@@ -34,15 +41,15 @@ class EnvConfig(BaseModel):
     dt: float = 0.1
     comm_range: Optional[float] = None
     max_time_steps: int = 200
-    alignment_goal: float = 0.97
-    alignment_rate_goal: float = 0.03
-    alignment_window_length: int = 32
     use_fixed_episode_length: bool = False
     get_state_hist: bool = False
     get_action_hist: bool = False
     ignore_comm_lost_agents: bool = False
     periodic_boundary: bool = False
     task_type: str = 'acs'
+    alignment_goal: float = 0.97
+    alignment_rate_goal: float = 0.03
+    alignment_window_length: int = 32
 
 
 class Config(BaseModel):
@@ -664,7 +671,86 @@ class NeighborSelectionFlockingEnv(gym.Env):
         Get the control inputs based on the agent states using the ACS Model
         :return: u (num_agents_max)
         """
+        """
+        Get the control inputs based on the agent states
+        :return: control_inputs (num_agents_max)
+        """
+        #  PLEASE WORK WITH ACTIVE AGENTS ONLY
 
+        # Get rel_pos, rel_dist, rel_vel, rel_ang, abs_ang, padding_mask, neighbor_masks
+        rel_pos = rel_state["rel_agent_positions"]   # (num_agents_max, num_agents_max, 2)
+        rel_dist = rel_state["rel_agent_dists"]      # (num_agents_max, num_agents_max)
+        rel_vel = rel_state["rel_agent_velocities"]  # (num_agents_max, num_agents_max, 2)
+        rel_ang = rel_state["rel_agent_headings"]    # (num_agents_max, num_agents_max)
+        abs_ang = state["agent_states"][:, 4]        # (num_agents_max, )
+        padding_mask = state["padding_mask"]         # (num_agents_max)
+        neighbor_masks = new_network  # (num_agents_max, num_agents_max)
+
+        # Get data of the active agents
+        active_agents_indices = np.nonzero(padding_mask)[0]  # (num_agents, )
+        active_agents_indices_2d = np.ix_(active_agents_indices, active_agents_indices)  # (num_agents,num_agents)
+        p = rel_pos[active_agents_indices_2d]  # (num_agents, num_agents, 2)
+        r = rel_dist[active_agents_indices_2d] + (np.eye(self.num_agents)*np.finfo(float).eps) #(num_agents, num_agents)
+        v = rel_vel[active_agents_indices_2d]  # (num_agents, num_agents, 2)
+        th = rel_ang[active_agents_indices_2d]  # (num_agents, num_agents)
+        th_i = abs_ang[padding_mask]  # (num_agents, )
+        net = neighbor_masks[active_agents_indices_2d]  # (num_agents, num_agents) may be no self-loops (i.e. 0 on diag)
+        N = (net + (np.eye(self.num_agents) * np.finfo(float).eps)).sum(axis=1)  # (num_agents, )
+
+        # Get control config
+        beta = self.config.control.beta
+        lam = self.config.control.lam
+        k1 = self.config.control.k1
+        k2 = self.config.control.k2
+        spd = self.config.control.speed
+        u_max = self.config.control.max_turn_rate
+        r0 = self.config.control.r0
+        sig = self.config.control.sig
+
+        # 1. Compute Alignment Control Input
+        # # u_cs = (lambda/n(N_i)) * sum_{j in N_i}[ psi(r_ij)sin(θ_j - θ_i) ],
+        # # where N_i is the set of neighbors of agent i,
+        # # psi(r_ij) = 1/(1+r_ij^2)^(beta),
+        # # r_ij = ||X_j - X_i||, X_i = (x_i, y_i),
+        psi = (1 + r**2)**(-beta)  # (num_agents, num_agents)
+        alignment_error = np.sin(th)  # (num_agents, num_agents)
+        u_cs = (lam / N) * (psi * alignment_error * net).sum(axis=1)  # (num_agents, )
+
+        # 2. Compute Cohesion and Separation Control Input
+        # # u_coh[i] = (sigma/N*V)
+        # #            * sum_(j in N_i)
+        # #               [
+        # #                   {
+        # #                       (K1/(2*r_ij^2))*<-rel_vel, -rel_pos> + (K2/(2*r_ij^2))*(r_ij-R)
+        # #                   }
+        # #                   * <[-sin(θ_i), cos(θ_i)]^T, rel_pos>
+        # #               ]
+        # # where N_i is the set of neighbors of agent i,
+        # # r_ij = ||X_j - X_i||, X_i = (x_i, y_i),
+        # # rel_vel = (vx_j - vx_i, vy_j - vy_i),
+        # # rel_pos = (x_j - x_i, y_j - y_i),
+        sig_NV = sig / (N * spd)  # (num_agents, )
+        k1_2r2 = k1 / (2 * r**2)  # (num_agents, num_agents)
+        k2_2r = k2 / (2 * r)  # (num_agents, num_agents)
+        v_dot_p = np.einsum('ijk,ijk->ij', v, p)  # (num_agents, num_agents)
+        r_minus_r0 = r - r0  # (num_agents, num_agents)
+        # below dir_vec and dir_dot_p in the commented lines are the old way of computing the dot product
+        # dir_vec = np.stack([-np.sin(th_i), np.cos(th_i)], axis=1)  # (num_agents, 2)
+        # dir_vec = np.tile(dir_vec[:, np.newaxis, :], (1, self.num_agents, 1))  # (num_agents, num_agents, 2)
+        # dir_dot_p = np.einsum('ijk,ijk->ij', dir_vec, p)  # (num_agents, num_agents)
+        sin_th_i = -np.sin(th_i)  # (num_agents, )
+        cos_th_i = np.cos(th_i)   # (num_agents, )
+        dir_dot_p = sin_th_i[:, np.newaxis]*p[:, :, 0] + cos_th_i[:, np.newaxis]*p[:, :, 1]  # (num_agents, num_agents)
+        u_coh = sig_NV * np.sum((k1_2r2 * v_dot_p + k2_2r * r_minus_r0) * dir_dot_p * net, axis=1)  # (num_agents, )
+
+        # 3. Saturation
+        u_active = np.clip(u_cs + u_coh, -u_max, u_max)  # (num_agents, )
+
+        # 4. Padding
+        u = np.zeros(self.num_agents_max, dtype=np.float32)  # (num_agents_max, )
+        u[padding_mask] = u_active  # (num_agents_max, )
+
+        return u
 
     @staticmethod
     def filter_active_agents_data(data, padding_mask):
@@ -898,6 +984,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
         padding_mask = state["padding_mask"]
         done = False
 
+        # 1. Check if the control task is done
         if self.config.env.task_type=='vicsek':
             # Check alignment
             if self.alignment_hist[self.time_step] > self.config.env.alignment_goal:
@@ -914,17 +1001,18 @@ class NeighborSelectionFlockingEnv(gym.Env):
         else:
             raise NotImplementedError(f"task_type({self.config.env.task_type}) not implemented/supported yet")
 
-        # Check max_time_step
+        # 2. Check max_time_step
         if self.time_step >= self.config.env.max_time_steps - 1:
             done = True
 
-        # Check communication loss
+        # 3. Check communication loss
         if self.config.env.comm_range is not None:
             if comm_loss_agents.any() and not done:
                 done = False if self.config.env.ignore_comm_lost_agents else True
                 self.lost_comm_step = self.time_step if self.has_lost_comm is not None else self.lost_comm_step
                 self.has_lost_comm = True
 
+        # 4. (Optional) Handle dones in the multi-env
         if self.config.env.env_mode == "single_env":
             return done
         elif self.config.env.env_mode == "multi_env":
