@@ -6,6 +6,8 @@
   - [x] Model: get it from lazy-message-listener-flocking
   - [x] Model: and update the names and clean it up
   - [x] Model: update it to be able to use address arbitrary numbers
+  - [ ] Fix: reward function
+  - [ ] Fix: done function
   - [ ] CustomActors: create a template for heuristics
     - [ ] Distance-based (disc model)
     - [ ] Topology-based

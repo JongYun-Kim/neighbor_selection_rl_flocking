@@ -734,10 +734,6 @@ class NeighborSelectionFlockingEnv(gym.Env):
         k2_2r = k2 / (2 * r)  # (num_agents, num_agents)
         v_dot_p = np.einsum('ijk,ijk->ij', v, p)  # (num_agents, num_agents)
         r_minus_r0 = r - r0  # (num_agents, num_agents)
-        # below dir_vec and dir_dot_p in the commented lines are the old way of computing the dot product
-        # dir_vec = np.stack([-np.sin(th_i), np.cos(th_i)], axis=1)  # (num_agents, 2)
-        # dir_vec = np.tile(dir_vec[:, np.newaxis, :], (1, self.num_agents, 1))  # (num_agents, num_agents, 2)
-        # dir_dot_p = np.einsum('ijk,ijk->ij', dir_vec, p)  # (num_agents, num_agents)
         sin_th_i = -np.sin(th_i)  # (num_agents, )
         cos_th_i = np.cos(th_i)   # (num_agents, )
         dir_dot_p = sin_th_i[:, np.newaxis]*p[:, :, 0] + cos_th_i[:, np.newaxis]*p[:, :, 1]  # (num_agents, num_agents)
