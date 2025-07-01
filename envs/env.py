@@ -20,7 +20,7 @@ import yaml
 
 class ControlConfig(BaseModel):
     speed: float = 15.0  # Speed in m/s.
-    max_turn_rate: float = 1e3  # Maximum turn rate in rad/s.
+    max_turn_rate: float = 8./15.  # Maximum turn rate in rad/s.
     initial_position_bound: float = 250.0  # Initial position bound in meters.
     # ACS specific controls
     beta: float = 1./3.  # communication decay rate
@@ -29,9 +29,11 @@ class ControlConfig(BaseModel):
     k1: float = 1.
     k2: float = 3.
     r0: float = 60.  # predefined (almost-)desired distance
+    rho: float = 1.0  # cost weighting factor b/w alignment and cohesion
 
 
 class EnvConfig(BaseModel):
+    is_training: bool = False
     seed: Optional[int] = None
     obs_dim: int = 6
     agent_name_prefix: str = 'agent_'
@@ -47,9 +49,18 @@ class EnvConfig(BaseModel):
     ignore_comm_lost_agents: bool = False
     periodic_boundary: bool = False
     task_type: str = 'acs'
+    # Vicsec specific parameters in the env
     alignment_goal: float = 0.97
     alignment_rate_goal: float = 0.03
     alignment_window_length: int = 32
+    # ACS specific parameters in the env
+    entropy_p_goal: Optional[float] = None  # Standard deviation of the goal position; if None, it will be set to 0.7 * r0
+    entropy_v_goal: float = 0.1  # Standard deviation of the goal velocity
+    entropy_p_rate_goal: float = 0.1  # Rate of the goal position entropy (50 steps)
+    entropy_v_rate_goal: float = 0.2  # Rate of the goal velocity entropy (50 steps)
+    acs_train_w_pos: float = 1.0
+    acs_train_w_vel: float = 0.2
+    acs_train_w_ctrl: float = 0.02
 
 
 class Config(BaseModel):
@@ -142,12 +153,13 @@ class NeighborSelectionFlockingEnv(gym.Env):
         # self.padding_mask_hist = None
         self.has_lost_comm = None
         self.lost_comm_step = None
-        # self.std_pos_hist, self.std_vel_hist = None, None
-        self.alignment_hist = None
-        self.spatial_entropy_hist = None
-        self.velocity_entropy_hist = None
         self.time_step = None
         # self.agent_time_step = None
+        # Vicsek hist
+        self.alignment_hist = None
+        # ACS hist
+        self.spatial_entropy_hist = None
+        self.velocity_entropy_hist = None
 
         self._validate_config()
 
@@ -245,6 +257,21 @@ class NeighborSelectionFlockingEnv(gym.Env):
         # # max_time_step: must be an int and > 0
         # assert isinstance(self.max_time_steps, int), "max_time_step must be an int"
         # assert self.max_time_steps > 0, "max_time_step must be > 0"
+
+        # ACS specific checks
+        # entropy_p_goal: set to the default value if None
+        if self.config.env.task_type == "acs":
+            if self.config.env.entropy_p_goal is None:
+                self.config.env.entropy_p_goal = 0.7 * self.config.control.r0
+            assert self.config.env.entropy_p_goal > 0, "entropy_p_goal must be > 0"
+            assert self.config.env.entropy_v_goal > 0, "entropy_v_goal must be > 0"
+            assert self.config.env.entropy_p_rate_goal > 0, "entropy_p_rate_goal must be > 0"
+            assert self.config.env.entropy_v_rate_goal > 0, "entropy_v_rate_goal must be > 0"
+        elif self.config.env.task_type == "vicsek":
+            if self.config.env.entropy_p_goal is not None:
+                warnings.warn("entropy_p_goal is not used in vicsek task; it will be ignored.")
+        else:
+            raise NotImplementedError("task_type must be either vicsek or acs at the moment")
 
     def show_current_config(self):
         print('-------------------CURRENT CONFIG-------------------')
@@ -401,10 +428,10 @@ class NeighborSelectionFlockingEnv(gym.Env):
 
         # Collect info
         info = {
-            # "std_pos": self.std_pos_hist[self.time_step],
-            # "std_vel": self.std_vel_hist[self.time_step],
-            "alignment": self.alignment_hist[self.time_step],
-            "original_rewards": _reward,
+            "spatial_entropy": self.spatial_entropy_hist[self.time_step] if self.config.env.task_type == "acs" else None,
+            "velocity_entropy": self.velocity_entropy_hist[self.time_step] if self.config.env.task_type == "acs" else None,
+            "alignment": self.alignment_hist[self.time_step] if self.config.env.task_type == "vicsek" else None,
+            "original_reward": _reward,
             "comm_loss_agents": comm_loss_agents,
         }
         info = self.get_extra_info(info, next_state, next_rel_state, control_inputs, rewards, done)
@@ -890,7 +917,17 @@ class NeighborSelectionFlockingEnv(gym.Env):
 
             return rewards  # (num_agents_max, )
         elif self.config.env.task_type=='acs':
+            rho = self.config.control.rho
 
+            # Heading rate control cost
+            heading_rate_costs = (self.config.env.dt * self.config.control.speed) * np.abs(control_inputs)  # (num_agents_max, )
+            # Cruise cost (time penalty)
+            cruise_costs = self.config.env.dt * np.ones(self.num_agents_max, dtype=np.float32)  # (num_agents_max, )
+
+            rewards = - (heading_rate_costs + (rho * cruise_costs))  # (num_agents_max, )
+            rewards[~state["padding_mask"]] = 0
+
+            return rewards  # (num_agents_max, )
         else:
             raise NotImplementedError("task_type not implemented yet")
 
@@ -993,6 +1030,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
                         if max_alignment - min_alignment < self.config.env.alignment_rate_goal:
                             done = True
         elif self.config.env.task_type=='acs':
+            # Get the spatial and velocity entropy
 
         else:
             raise NotImplementedError(f"task_type({self.config.env.task_type}) not implemented/supported yet")
@@ -1031,6 +1069,30 @@ class NeighborSelectionFlockingEnv(gym.Env):
         Impelment your custom reward logic
         :return: custom_reward
         """
+        if self.config.env.is_training and self.config.env.task_type=='acs':
+            # Get spatial entropy errors
+            std_pos = self.spatial_entropy_hist[self.time_step]  # scalar
+            std_pos_target = self.config.env.entropy_p_goal - 2.5
+            std_pos_error = (std_pos - std_pos_target) ** 2  # (100-40)**2 = 3600
+            pos_error_reward = - (1 / 3600) * np.maximum(std_pos_error, 0)
+
+            # Get velocity entropy errors
+            std_vel = self.velocity_entropy_hist[self.time_step]
+            std_vel_target = self.config.env.entropy_v_goal - 0.05
+            std_vel_error = (std_vel - std_vel_target) ** 2  # (15-0.05)**2 = 223.5052
+            vel_error_reward = - (1 / 220) * np.maximum(std_vel_error, 0.0)
+
+            # Get control cost
+            rho = self.config.control.rho
+            control_cost = rewards.sum() / self.num_agents
+            control_cost = control_cost + (rho * self.config.env.dt)
+
+            # Get the custom reward
+            custom_reward = (self.config.env.acs_train_w_pos * pos_error_reward
+                             + self.config.env.acs_train_w_vel * vel_error_reward
+                             - self.config.env.acs_train_w_ctrl * control_cost)
+            return custom_reward
+
         return NotImplemented
 
     def render(self, mode='human'):
