@@ -58,6 +58,7 @@ class EnvConfig(BaseModel):
     entropy_v_goal: float = 0.1  # Standard deviation of the goal velocity
     entropy_p_rate_goal: float = 0.1  # Rate of the goal position entropy (50 steps)
     entropy_v_rate_goal: float = 0.2  # Rate of the goal velocity entropy (50 steps)
+    entropy_rate_window_length: int = 50  # Window length for the entropy rate
     acs_train_w_pos: float = 1.0
     acs_train_w_vel: float = 0.2
     acs_train_w_ctrl: float = 0.02
@@ -1030,8 +1031,23 @@ class NeighborSelectionFlockingEnv(gym.Env):
                         if max_alignment - min_alignment < self.config.env.alignment_rate_goal:
                             done = True
         elif self.config.env.task_type=='acs':
-            # Get the spatial and velocity entropy
+            # Get the spatial and velocity entropy and assign to the histograms
+            spatial_entropy, velocity_entropy = self._get_entropy(state)
+            self.spatial_entropy_hist[self.time_step] = spatial_entropy
+            self.velocity_entropy_hist[self.time_step] = velocity_entropy
 
+            # Check if the spatial and velocity entropies are within the goals
+            if (spatial_entropy < self.config.env.entropy_p_goal) and (velocity_entropy < self.config.env.entropy_v_goal):
+                if not self.config.env.use_fixed_episode_length:
+                    # Check if the entropies are stable over the last N steps (entropy rate checks)
+                    effective_win_len = self.config.env.entropy_rate_window_length - 1
+                    if self.time_step >= effective_win_len:
+                        last_n_spatial_entropies = self.spatial_entropy_hist[self.time_step - effective_win_len:self.time_step + 1]
+                        last_n_velocity_entropies = self.velocity_entropy_hist[self.time_step - effective_win_len:self.time_step + 1]
+                        spatial_entropy_rate = np.max(last_n_spatial_entropies) - np.min(last_n_spatial_entropies)
+                        velocity_entropy_rate = np.max(last_n_velocity_entropies)
+                        if (spatial_entropy_rate < self.config.env.entropy_p_rate_goal) and (velocity_entropy_rate < self.config.env.entropy_v_rate_goal):
+                            done = True
         else:
             raise NotImplementedError(f"task_type({self.config.env.task_type}) not implemented/supported yet")
 
@@ -1060,6 +1076,18 @@ class NeighborSelectionFlockingEnv(gym.Env):
             return dones
         else:
             raise ValueError(f"self.env_mode: 'single_env' / 'multi_env'; not {self.config.env.env_mode}; in check_episode_termination()")
+
+    def _get_entropy(self, state):
+        padding_mask = state["padding_mask"]
+        masked_states = state["agent_states"][padding_mask]  # (num_agents, 4)  <- for optimized indexing
+        agent_positions = masked_states[:, :2]    # (num_agents, 2)
+        agent_velocities = masked_states[:, 2:4]  # (num_agents, 2)
+
+        # Get spatial and velocity entropy
+        spatial_entropy = np.sqrt(np.sum(np.var(agent_positions, axis=0)))    # scalar
+        velocity_entropy = np.sqrt(np.sum(np.var(agent_velocities, axis=0)))  # scalar
+
+        return spatial_entropy, velocity_entropy
 
     def get_extra_info(self, info, state, rel_state, control_inputs, rewards, done):
         return info
