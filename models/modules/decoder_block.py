@@ -2,8 +2,7 @@ import copy
 import torch
 import torch.nn as nn
 
-from modules.residual_connection_layer import ResidualConnectionLayer, IdentityResidualLayer, \
-    NoResidualButSameForward
+from models.modules.residual_connection_layer import ResidualConnectionLayer, IdentityResidualLayer, NoResidualButSameForward
 
 
 class DecoderBlock(nn.Module):

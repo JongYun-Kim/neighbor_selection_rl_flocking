@@ -1,7 +1,7 @@
 import copy
 import torch.nn as nn
 
-from modules.residual_connection_layer import ResidualConnectionLayer
+from models.modules.residual_connection_layer import ResidualConnectionLayer
 
 
 class EncoderBlock(nn.Module):
