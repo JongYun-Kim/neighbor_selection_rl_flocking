@@ -20,7 +20,7 @@ import yaml
 
 class ControlConfig(BaseModel):
     speed: float = 15.0  # Speed in m/s.
-    max_turn_rate: float = 8./15.  # Maximum turn rate in rad/s.
+    max_turn_rate: float = 8/15  # Maximum turn rate in rad/s.
     initial_position_bound: float = 250.0  # Initial position bound in meters.
     # ACS specific controls
     beta: float = 1./3.  # communication decay rate
@@ -35,21 +35,21 @@ class ControlConfig(BaseModel):
 class EnvConfig(BaseModel):
     is_training: bool = False
     seed: Optional[int] = None
-    obs_dim: int = 6
+    obs_dim: int = 4  # periodic: 6, non-periodic: 4
     agent_name_prefix: str = 'agent_'
     env_mode: str = 'single_env'
     action_type: str = 'binary_vector'
     num_agents_pool: List[conint(ge=1)]  # Must clarify it !!
     dt: float = 0.1
     comm_range: Optional[float] = None
-    max_time_steps: int = 200
+    max_time_steps: int = 1000
     use_fixed_episode_length: bool = False
     get_state_hist: bool = False
     get_action_hist: bool = False
     ignore_comm_lost_agents: bool = False
     periodic_boundary: bool = False
     task_type: str = 'acs'
-    # Vicsec specific parameters in the env
+    # Vicsek specific parameters in the env
     alignment_goal: float = 0.97
     alignment_rate_goal: float = 0.03
     alignment_window_length: int = 32
