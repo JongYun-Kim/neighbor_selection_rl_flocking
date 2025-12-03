@@ -15,7 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo nano x11-apps \
     iproute2 iputils-ping net-tools dnsutils \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 ffmpeg \
+    openssh-server \
+ && mkdir -p /var/run/sshd \
  && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 22
 
 # python
 RUN add-apt-repository ppa:deadsnakes/ppa -y \
@@ -119,15 +123,30 @@ ARG UID=1000
 ARG GID=1000
 RUN groupadd -g ${GID} flocking || true \
  && useradd -m -s /bin/bash -u ${UID} -g ${GID} flocking \
- && echo 'flocking:neighbor' | chpasswd
+ && echo 'flocking:neighbor' | chpasswd \
+ && mkdir -p /home/flocking/.ssh \
+ && chown -R flocking:flocking /home/flocking/.ssh \
+ && chmod 700 /home/flocking/.ssh
+# 필요하면 여기서 authorized_keys도 미리 심을 수 있음:
+# && touch /home/flocking/.ssh/authorized_keys \
+# && chown flocking:flocking /home/flocking/.ssh/authorized_keys \
+# && chmod 600 /home/flocking/.ssh/authorized_keys
+
+RUN sed -ri 's/^#?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config \
+ && sed -ri 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
 RUN mkdir -p /workspace && chown -R ${UID}:${GID} /workspace
 WORKDIR /workspace
-USER flocking
+
+# get entrypoint file
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+# USER flocking -- included in the entrypoint!!
 
 # set cuda params
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-# check at the cmd
-CMD ["bash", "-lc", "python -V && python3 -V && pip -V && python -c 'import torch, torchvision, torchaudio, ray, gym, numpy as np; print(\"torch\", torch.__version__); print(\"torchvision\", torchvision.__version__); print(\"torchaudio\", torchaudio.__version__); print(\"ray\", ray.__version__); print(\"gym\", gym.__version__); print(\"numpy\", np.__version__)' || true; exec bash"]
+# go entrypoint with bash
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["bash"]
