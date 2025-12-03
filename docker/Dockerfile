@@ -130,4 +130,4 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # check at the cmd
-CMD ["bash", "-lc", "python -V && pip -V && python -c 'import torch, torchvision, torchaudio, ray, gym, numpy as np; print(\"torch\", torch.__version__); print(\"torchvision\", torchvision.__version__); print(\"torchaudio\", torchaudio.__version__); print(\"ray\", ray.__version__); print(\"gym\", gym.__version__); print(\"numpy\", np.__version__)' || true"]
+CMD ["bash", "-lc", "python -V && python3 -V && pip -V && python -c 'import torch, torchvision, torchaudio, ray, gym, numpy as np; print(\"torch\", torch.__version__); print(\"torchvision\", torchvision.__version__); print(\"torchaudio\", torchaudio.__version__); print(\"ray\", ray.__version__); print(\"gym\", gym.__version__); print(\"numpy\", np.__version__)' || true; exec bash"]
