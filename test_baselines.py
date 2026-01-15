@@ -12,6 +12,7 @@ from baselines import (
     DistanceBasedNeighborSelection,
     FixedNearestNeighborSelection,
     FixedFarthestNeighborSelection,
+    MetricTopologicalInteractionSelection,
     create_baseline
 )
 
@@ -132,12 +133,27 @@ def main():
     baseline_farthest = FixedFarthestNeighborSelection(k=3, periodic_boundary=False)
     test_baseline(env, baseline_farthest, "Fixed-Farthest Neighbor Selection (k=3)", num_steps=10)
 
-    # Test 5: Using factory function
+    # Test 5: Metric-Topological Interaction (MTI) Selection
+    baseline_mti = MetricTopologicalInteractionSelection(
+        k=3,
+        distance_threshold=0.5,
+        threshold_a=0.1,  # TOP->MET: switch when well-aligned (< 0.1 rad)
+        threshold_b=0.5,  # MET->TOP: switch when dispersed (> 0.5 rad)
+        seed=42
+    )
+    test_baseline(env, baseline_mti, "Metric-Topological Interaction (MTI)", num_steps=10)
+
+    # Test 6: Using factory function
     print(f"\n{'='*60}")
     print("Testing factory function")
     print(f"{'='*60}")
     baseline_factory = create_baseline('random', selection_probability=0.7, seed=123)
     test_baseline(env, baseline_factory, "Random (via factory, p=0.7)", num_steps=10)
+
+    # Test 7: MTI via factory function
+    baseline_mti_factory = create_baseline('mti', k=5, distance_threshold=0.6,
+                                          threshold_a=0.15, threshold_b=0.4, seed=999)
+    test_baseline(env, baseline_mti_factory, "MTI (via factory)", num_steps=10)
 
     print(f"\n{'='*60}")
     print("All tests completed successfully!")

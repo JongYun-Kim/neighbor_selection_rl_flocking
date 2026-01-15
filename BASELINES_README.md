@@ -104,6 +104,61 @@ action = baseline(obs)
 - Encourages long-range connections
 - Useful for studying exploration vs. exploitation in flocking
 
+### 5. Metric-Topological Interaction (MTI) Selection
+
+Adaptive neighbor selection based on local heading alignment, implementing the model from:
+
+**"Metric–topological interaction model of collective behavior"** (Niizato & Gunji, 2011)
+
+Each agent maintains an internal mode (TOP or MET) that switches based on heading alignment with neighbors. This creates context-aware neighbor selection that adapts to local swarm dynamics.
+
+**Parameters:**
+- `k` (int): Number of nearest neighbors in TOP (topological) mode
+- `distance_threshold` (float): Distance threshold R for MET (metric) mode (normalized units)
+- `threshold_a` (float): TOP→MET switch threshold in radians (alignment threshold)
+- `threshold_b` (float): MET→TOP switch threshold in radians (dispersion threshold)
+- `periodic_boundary` (bool): Whether the environment uses periodic boundaries (default: False)
+- `boundary_size` (float, optional): Size of periodic boundary
+- `seed` (int, optional): Random seed for reproducibility in MET mode sampling
+
+**Usage:**
+```python
+from baselines import MetricTopologicalInteractionSelection
+
+baseline = MetricTopologicalInteractionSelection(
+    k=5,                      # Select 5 nearest neighbors in TOP mode
+    distance_threshold=0.5,   # Select neighbors within 0.5 in MET mode
+    threshold_a=0.1,          # Switch to MET when aligned (< 0.1 rad difference)
+    threshold_b=0.5,          # Switch to TOP when dispersed (> 0.5 rad difference)
+    seed=42
+)
+action = baseline(obs)
+
+# For episode resets (optional, auto-detected):
+baseline.reset()
+```
+
+**Characteristics:**
+- **Stateful**: Maintains each agent's mode (TOP/MET) across time steps
+- **Adaptive**: Switches modes based on local heading alignment
+- **TOP mode**: Selects k nearest neighbors (promotes local clustering)
+- **MET mode**: Selects all neighbors within distance threshold (promotes cohesion)
+
+**Mode Switching Logic:**
+- **TOP → MET**: When agent's heading is well-aligned with its k nearest neighbors (heading difference ≤ threshold_a)
+- **MET → TOP**: When two randomly sampled neighbors have large heading difference (> threshold_b), indicating local dispersion
+
+**Implementation Notes:**
+- Heading information is extracted from relative heading observations: `[cos(θ_j - θ_i), sin(θ_j - θ_i)]`
+- Circular mean is used for averaging heading angles
+- Automatically detects episode resets when `num_agents_max` changes
+- Handles edge cases: padding agents, insufficient neighbors, etc.
+
+**Use Cases:**
+- Studying emergent adaptive behavior in flocking
+- Comparing context-aware vs. static neighbor selection
+- Understanding the role of local alignment information in collective behavior
+
 ## Factory Function
 
 A convenience factory function is provided to create baselines:
@@ -122,6 +177,10 @@ baseline = create_baseline('nearest', k=5, periodic_boundary=False)
 
 # Create k-farthest baseline
 baseline = create_baseline('farthest', k=3, periodic_boundary=False)
+
+# Create MTI baseline
+baseline = create_baseline('mti', k=5, distance_threshold=0.5,
+                          threshold_a=0.1, threshold_b=0.5, seed=42)
 ```
 
 ## Complete Example
