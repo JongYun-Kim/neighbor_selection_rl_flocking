@@ -17,7 +17,93 @@ All baselines:
 """
 
 import numpy as np
+from scipy.spatial import Voronoi
 from typing import Dict, Optional
+
+
+class VoronoiNeighborSelection:
+    """
+    Reference: (2010 Ginelli) Relevance of Metric-Free Interactions in Flocking Phenomena
+
+    Select neighbors based on Voronoi tessellation.
+    Use vor.ridge_points to determine neighbors, which is adjacent points sharing a Voronoi ridge.
+    """
+
+    def __init__(self):
+        pass
+
+    def __call__(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
+        """
+        Generate Voronoi-based neighbor selection action.
+
+        Args:
+            obs: Environment observation containing:
+                - 'neighbor_masks': (num_agents_max, num_agents_max) boolean array
+                - 'padding_mask': (num_agents_max,) boolean array
+                - 'local_agent_infos': (num_agents_max, num_agents_max, obs_dim) array
+
+        Returns:
+            action: (num_agents_max, num_agents_max) integer array with neighbor selections
+        """
+        neighbor_masks = obs['neighbor_masks']
+        padding_mask = obs['padding_mask']
+        local_agent_infos = obs['local_agent_infos']
+        num_agents_max = neighbor_masks.shape[0]
+
+        # Initialize action with self-loops
+        action = np.eye(num_agents_max, dtype=np.int8)
+
+        # Create valid neighbor mask
+        padding_mask_2d = padding_mask[:, np.newaxis] & padding_mask[np.newaxis, :]
+        valid_neighbors = neighbor_masks & padding_mask_2d
+
+        # Get indices of real agents
+        real_agent_indices = np.where(padding_mask)[0]
+        num_real_agents = len(real_agent_indices)
+
+        # Voronoi requires at least 3 points in 2D
+        if num_real_agents < 3:
+            # Fall back to selecting all valid neighbors
+            valid_neighbors_no_self = valid_neighbors.copy()
+            np.fill_diagonal(valid_neighbors_no_self, False)
+            action = action | valid_neighbors_no_self.astype(np.int8)
+            return action
+
+        # Reconstruct positions from local_agent_infos
+        # Use agent 0 as reference and compute absolute positions from relative positions
+        # local_agent_infos[i, j, 0:2] = normalized relative position of j from i's perspective
+        # We pick a reference agent (first real agent) and use its view to get positions
+        ref_agent = real_agent_indices[0]
+        positions = np.zeros((num_agents_max, 2))
+        
+        # Position of reference agent is at origin (we only need relative positions for Voronoi)
+        positions[ref_agent] = [0.0, 0.0]
+        
+        # Get positions of other agents relative to reference agent
+        for j in real_agent_indices:
+            if j != ref_agent:
+                positions[j] = local_agent_infos[ref_agent, j, :2]
+
+        # Extract positions for real agents only
+        real_positions = positions[real_agent_indices]  # (num_real_agents, 2)
+
+        # Compute Voronoi tessellation
+        vor = Voronoi(real_positions)
+
+        # Build Voronoi neighbor adjacency from ridge_points
+        voronoi_adj = np.zeros((num_agents_max, num_agents_max), dtype=bool)
+        for a, b in vor.ridge_points:
+            # Map back to original indices
+            orig_a = real_agent_indices[a]
+            orig_b = real_agent_indices[b]
+            voronoi_adj[orig_a, orig_b] = True
+            voronoi_adj[orig_b, orig_a] = True
+
+        # Select neighbors that are both Voronoi neighbors AND valid (in neighbor_masks)
+        selected = voronoi_adj & valid_neighbors
+        action = action | selected.astype(np.int8)
+
+        return action
 
 
 class RandomNeighborSelection:
@@ -602,6 +688,7 @@ def create_baseline(baseline_type: str, **kwargs):
         'nearest': FixedNearestNeighborSelection,
         'farthest': FixedFarthestNeighborSelection,
         'mti': MetricTopologicalInteractionSelection,
+        'voronoi': VoronoiNeighborSelection,
     }
 
     if baseline_type not in baselines:

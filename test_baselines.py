@@ -13,6 +13,7 @@ from baselines import (
     FixedNearestNeighborSelection,
     FixedFarthestNeighborSelection,
     MetricTopologicalInteractionSelection,
+    VoronoiNeighborSelection,
     create_baseline
 )
 
@@ -147,7 +148,11 @@ def main():
     )
     test_baseline(env, baseline_mti, "Metric-Topological Interaction (MTI)", num_steps=10)
 
-    # Test 6: Using factory function
+    # Test 6: Voronoi Neighbor Selection
+    baseline_voronoi = VoronoiNeighborSelection()
+    test_baseline(env, baseline_voronoi, "Voronoi Neighbor Selection", num_steps=10)
+
+    # Test 7: Using factory function
     print(f"\n{'='*60}")
     print("Testing factory function")
     print(f"{'='*60}")
