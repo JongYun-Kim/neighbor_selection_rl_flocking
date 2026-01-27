@@ -1,12 +1,15 @@
 """
 Heuristic baseline neighbor selection strategies for flocking environments.
 
-This module provides five heuristic baselines for neighbor selection:
-1. Random Neighbor Selection: Randomly select neighbors based on probability
-2. Distance-Based Neighbor Selection: Select neighbors within a distance threshold
-3. Fixed-Nearest Neighbor Selection: Select k nearest neighbors
-4. Fixed-Farthest Neighbor Selection: Select k farthest neighbors
-5. Metric-Topological Interaction (MTI): Adaptive neighbor selection with mode switching
+This module provides eight heuristic baselines for neighbor selection:
+1. Voronoi Neighbor Selection: Select neighbors based on Voronoi tessellation
+2. Random Neighbor Selection: Randomly select neighbors based on probability
+3. Distance-Based Neighbor Selection: Select neighbors within a distance threshold
+4. Fixed-Nearest Neighbor Selection: Select k nearest neighbors
+5. Fixed-Farthest Neighbor Selection: Select k farthest neighbors
+6. Metric-Topological Interaction (MTI): Adaptive neighbor selection with mode switching
+7. Highest-Degree Neighbor Selection: Select neighbors with highest degree (most connections)
+8. Modified Fixed Number of Neighbors (MFNN): Select nearest neighbor in angular sectors
 
 All baselines:
 - Accept environment observations in standard format
@@ -664,13 +667,241 @@ class MetricTopologicalInteractionSelection:
         return np.arctan2(np.sin(angle), np.cos(angle))
 
 
+class HighestDegreeNeighborSelection:
+    """
+    Select neighbors with the highest degree (most connections).
+
+    Based on: "Research on swarm consistent performance of improved Vicsek model
+    with neighbors' degree"
+
+    This baseline selects the beta neighbors that have the most connections to other
+    agents. The intuition is that well-connected neighbors may be more informative
+    for achieving consensus or alignment.
+
+    Degree is computed as the number of valid neighbors each agent has.
+    """
+
+    def __init__(self, beta: int, periodic_boundary: bool = False,
+                 boundary_size: Optional[float] = None):
+        """
+        Initialize Highest-Degree Neighbor Selection baseline.
+
+        Args:
+            beta: Number of highest-degree neighbors to select
+            periodic_boundary: Whether environment uses periodic boundaries
+            boundary_size: Size of periodic boundary (required if periodic_boundary=True)
+        """
+        assert beta > 0, "beta must be positive"
+        self.beta = beta
+        self.periodic_boundary = periodic_boundary
+        self.boundary_size = boundary_size
+
+        if periodic_boundary:
+            assert boundary_size is not None, "boundary_size required for periodic boundaries"
+
+    def __call__(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
+        """
+        Generate highest-degree neighbor selection action.
+
+        Args:
+            obs: Environment observation containing:
+                - 'neighbor_masks': (num_agents_max, num_agents_max) boolean array
+                - 'padding_mask': (num_agents_max,) boolean array
+                - 'local_agent_infos': (num_agents_max, num_agents_max, obs_dim) array
+
+        Returns:
+            action: (num_agents_max, num_agents_max) integer array with neighbor selections
+        """
+        neighbor_masks = obs['neighbor_masks']
+        padding_mask = obs['padding_mask']
+        local_agent_infos = obs['local_agent_infos']
+        num_agents_max = neighbor_masks.shape[0]
+
+        # Initialize action with self-loops
+        action = np.eye(num_agents_max, dtype=np.int8)
+
+        # Compute degree for each agent (number of valid neighbors, including self)
+        # degree[j] = number of agents that have j as a neighbor
+        padding_mask_2d = padding_mask[:, np.newaxis] & padding_mask[np.newaxis, :]
+        valid_neighbors = neighbor_masks & padding_mask_2d
+
+        # Degree of agent j = sum of column j in valid_neighbors
+        degrees = valid_neighbors.sum(axis=0)  # (num_agents_max,)
+
+        # Compute distances for tie-breaking
+        if self.periodic_boundary:
+            raise NotImplementedError("Periodic boundary distance computation not yet implemented")
+        else:
+            rel_positions = local_agent_infos[:, :, :2]
+            distances = np.linalg.norm(rel_positions, axis=2)
+
+        # Create valid neighbor mask (excluding self-loops)
+        valid_neighbors_no_self = valid_neighbors.copy()
+        np.fill_diagonal(valid_neighbors_no_self, False)
+
+        # For each agent, select beta neighbors with highest degree
+        for i in range(num_agents_max):
+            if not padding_mask[i]:
+                continue  # Skip padding agents
+
+            valid_mask_i = valid_neighbors_no_self[i]
+
+            if not valid_mask_i.any():
+                continue  # No valid neighbors
+
+            # Get valid neighbor indices
+            valid_neighbor_indices = np.where(valid_mask_i)[0]
+
+            # Get degrees of valid neighbors
+            neighbor_degrees = degrees[valid_neighbor_indices]
+
+            # Get distances to valid neighbors (for tie-breaking)
+            neighbor_distances = distances[i, valid_neighbor_indices]
+
+            # Sort by degree (descending), then by distance (ascending) for tie-breaking
+            # Create sorting key: negative degree (for descending), then distance (for ascending)
+            sort_keys = np.column_stack((-neighbor_degrees, neighbor_distances))
+            sorted_indices = np.lexsort((sort_keys[:, 1], sort_keys[:, 0]))
+
+            # Select top beta neighbors
+            beta_actual = min(self.beta, len(valid_neighbor_indices))
+            selected_local_indices = sorted_indices[:beta_actual]
+            selected_neighbors = valid_neighbor_indices[selected_local_indices]
+
+            action[i, selected_neighbors] = 1
+
+        return action
+
+
+class ModifiedFixedNumberNeighbors:
+    """
+    Modified Fixed Number of Neighbors (MFNN) selection.
+
+    Based on: "Enhancing synchronization of self-propelled particles via
+    modified rule of fixed number of neighbors"
+
+    This baseline divides the space around each agent into (k-1) equal angular
+    sectors and selects the nearest neighbor in each sector. This ensures
+    spatial diversity in neighbor selection, preventing clustering of selected
+    neighbors in one direction.
+
+    The angular sectors are defined relative to the agent's local coordinate frame.
+    """
+
+    def __init__(self, k: int, periodic_boundary: bool = False,
+                 boundary_size: Optional[float] = None):
+        """
+        Initialize Modified Fixed Number of Neighbors baseline.
+
+        Args:
+            k: Maximum number of neighbors to select (space divided into k-1 sectors)
+            periodic_boundary: Whether environment uses periodic boundaries
+            boundary_size: Size of periodic boundary (required if periodic_boundary=True)
+        """
+        assert k > 1, "k must be at least 2 to create sectors"
+        self.k = k
+        self.num_sectors = k - 1
+        self.periodic_boundary = periodic_boundary
+        self.boundary_size = boundary_size
+
+        if periodic_boundary:
+            assert boundary_size is not None, "boundary_size required for periodic boundaries"
+
+    def __call__(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
+        """
+        Generate MFNN neighbor selection action.
+
+        Args:
+            obs: Environment observation containing:
+                - 'neighbor_masks': (num_agents_max, num_agents_max) boolean array
+                - 'padding_mask': (num_agents_max,) boolean array
+                - 'local_agent_infos': (num_agents_max, num_agents_max, obs_dim) array
+
+        Returns:
+            action: (num_agents_max, num_agents_max) integer array with neighbor selections
+        """
+        neighbor_masks = obs['neighbor_masks']
+        padding_mask = obs['padding_mask']
+        local_agent_infos = obs['local_agent_infos']
+        num_agents_max = neighbor_masks.shape[0]
+
+        # Initialize action with self-loops
+        action = np.eye(num_agents_max, dtype=np.int8)
+
+        # Compute distances and angles
+        if self.periodic_boundary:
+            raise NotImplementedError("Periodic boundary distance computation not yet implemented")
+        else:
+            rel_positions = local_agent_infos[:, :, :2]  # (num_agents_max, num_agents_max, 2)
+            distances = np.linalg.norm(rel_positions, axis=2)  # (num_agents_max, num_agents_max)
+
+            # Compute angles of neighbors relative to agent
+            # Note: This is in the world frame, not rotated to agent's heading
+            # For a more accurate implementation aligned with agent heading,
+            # we would need absolute heading information
+            angles = np.arctan2(rel_positions[:, :, 1], rel_positions[:, :, 0])  # (num_agents_max, num_agents_max)
+
+        # Create valid neighbor mask (excluding self-loops)
+        padding_mask_2d = padding_mask[:, np.newaxis] & padding_mask[np.newaxis, :]
+        valid_neighbors = neighbor_masks & padding_mask_2d
+        valid_neighbors_no_self = valid_neighbors.copy()
+        np.fill_diagonal(valid_neighbors_no_self, False)
+
+        # Define angular sectors
+        # Divide [-π, π] into num_sectors equal sectors
+        sector_boundaries = np.linspace(-np.pi, np.pi, self.num_sectors + 1)
+
+        # For each agent, select nearest neighbor in each sector
+        for i in range(num_agents_max):
+            if not padding_mask[i]:
+                continue  # Skip padding agents
+
+            valid_mask_i = valid_neighbors_no_self[i]
+
+            if not valid_mask_i.any():
+                continue  # No valid neighbors
+
+            # Get angles and distances to valid neighbors
+            valid_neighbor_indices = np.where(valid_mask_i)[0]
+            neighbor_angles = angles[i, valid_neighbor_indices]
+            neighbor_distances = distances[i, valid_neighbor_indices]
+
+            # For each sector, find the nearest neighbor
+            for sector_idx in range(self.num_sectors):
+                sector_min = sector_boundaries[sector_idx]
+                sector_max = sector_boundaries[sector_idx + 1]
+
+                # Find neighbors in this sector
+                # Handle the wrap-around at ±π
+                if sector_idx == self.num_sectors - 1:
+                    # Last sector: include right boundary
+                    in_sector = (neighbor_angles >= sector_min) & (neighbor_angles <= sector_max)
+                else:
+                    in_sector = (neighbor_angles >= sector_min) & (neighbor_angles < sector_max)
+
+                if not in_sector.any():
+                    continue  # No neighbors in this sector
+
+                # Find nearest neighbor in this sector
+                sector_distances = neighbor_distances[in_sector]
+                sector_neighbor_indices = valid_neighbor_indices[in_sector]
+
+                nearest_idx_in_sector = np.argmin(sector_distances)
+                nearest_neighbor = sector_neighbor_indices[nearest_idx_in_sector]
+
+                action[i, nearest_neighbor] = 1
+
+        return action
+
+
 # Convenience function to create baselines
 def create_baseline(baseline_type: str, **kwargs):
     """
     Factory function to create baseline policies.
 
     Args:
-        baseline_type: One of 'random', 'distance', 'nearest', 'farthest', 'mti'
+        baseline_type: One of 'random', 'distance', 'nearest', 'farthest', 'mti',
+                      'highest_degree', 'mfnn'
         **kwargs: Arguments to pass to the baseline constructor
 
     Returns:
@@ -681,6 +912,8 @@ def create_baseline(baseline_type: str, **kwargs):
         >>> baseline = create_baseline('nearest', k=5)
         >>> baseline = create_baseline('mti', k=5, distance_threshold=0.5,
         ...                           threshold_a=0.1, threshold_b=0.5, seed=42)
+        >>> baseline = create_baseline('highest_degree', beta=5)
+        >>> baseline = create_baseline('mfnn', k=6)
     """
     baselines = {
         'random': RandomNeighborSelection,
@@ -689,6 +922,8 @@ def create_baseline(baseline_type: str, **kwargs):
         'farthest': FixedFarthestNeighborSelection,
         'mti': MetricTopologicalInteractionSelection,
         'voronoi': VoronoiNeighborSelection,
+        'highest_degree': HighestDegreeNeighborSelection,
+        'mfnn': ModifiedFixedNumberNeighbors,
     }
 
     if baseline_type not in baselines:

@@ -12,7 +12,43 @@ The baseline heuristics provide simple, interpretable policies for neighbor sele
 
 ## Available Baselines
 
-### 1. Random Neighbor Selection
+### 1. Voronoi Neighbor Selection
+
+Selects neighbors based on Voronoi tessellation - agents that share a Voronoi ridge (are adjacent in the Voronoi diagram) are selected as neighbors.
+
+**Reference:** Ginelli et al. (2010), "Relevance of Metric-Free Interactions in Flocking Phenomena"
+
+**Parameters:**
+- None (no configuration parameters)
+
+**Usage:**
+```python
+from baselines import VoronoiNeighborSelection
+
+baseline = VoronoiNeighborSelection()
+action = baseline(obs)
+```
+
+**Characteristics:**
+- Metric-free interaction: Neighborhood relationships emerge from spatial topology rather than fixed distance thresholds
+- Naturally adapts to local density variations
+- Each agent's Voronoi cell contains all points closer to that agent than to any other
+- Neighbors are agents with adjacent Voronoi cells (sharing a boundary)
+- Falls back to selecting all valid neighbors when fewer than 3 agents exist (Voronoi requires ≥3 points in 2D)
+- Respects communication range constraints (only selects Voronoi neighbors within neighbor_masks)
+
+**Implementation Details:**
+- Uses `scipy.spatial.Voronoi` to compute tessellation
+- Reconstructs agent positions from relative position observations
+- Identifies neighbors from `vor.ridge_points` (pairs of points sharing a ridge)
+- Intersection of Voronoi adjacency and valid neighbor masks ensures physical constraints are respected
+
+**Use Cases:**
+- Studying metric-free collective behavior
+- Comparing distance-based vs. topology-based interactions
+- Investigating emergent communication patterns in variable-density swarms
+
+### 2. Random Neighbor Selection
 
 Randomly selects neighbors based on a specified probability.
 
@@ -33,7 +69,7 @@ action = baseline(obs)
 - No distance information required
 - Suitable for testing environment dynamics with random connectivity
 
-### 2. Distance-Based Neighbor Selection
+### 3. Distance-Based Neighbor Selection
 
 Selects neighbors whose pairwise distance is below a given threshold.
 
@@ -60,7 +96,7 @@ action = baseline(obs)
 
 **Note:** Currently supports non-periodic boundaries only. Periodic boundary support is planned for future updates.
 
-### 3. Fixed-Nearest Neighbor Selection
+### 4. Fixed-Nearest Neighbor Selection
 
 Selects the k nearest valid neighbors for each agent.
 
@@ -82,7 +118,7 @@ action = baseline(obs)
 - Promotes local clustering
 - Gracefully handles cases where an agent has fewer than k valid neighbors (selects all available)
 
-### 4. Fixed-Farthest Neighbor Selection
+### 5. Fixed-Farthest Neighbor Selection
 
 Selects the k farthest valid neighbors for each agent.
 
@@ -104,7 +140,7 @@ action = baseline(obs)
 - Encourages long-range connections
 - Useful for studying exploration vs. exploitation in flocking
 
-### 5. Metric-Topological Interaction (MTI) Selection
+### 6. Metric-Topological Interaction (MTI) Selection
 
 Adaptive neighbor selection based on local heading alignment, implementing the model from:
 
@@ -159,12 +195,93 @@ baseline.reset()
 - Comparing context-aware vs. static neighbor selection
 - Understanding the role of local alignment information in collective behavior
 
+### 7. Highest-Degree Neighbor Selection
+
+Selects neighbors with the highest degree (most connections), based on:
+
+**"Research on swarm consistent performance of improved Vicsek model with neighbors' degree"**
+
+This baseline prioritizes well-connected neighbors, with the intuition that agents with more connections may be more informative for achieving consensus or alignment in the swarm.
+
+**Parameters:**
+- `beta` (int): Number of highest-degree neighbors to select
+- `periodic_boundary` (bool): Whether the environment uses periodic boundaries (default: False)
+- `boundary_size` (float, optional): Size of periodic boundary
+
+**Usage:**
+```python
+from baselines import HighestDegreeNeighborSelection
+
+baseline = HighestDegreeNeighborSelection(beta=5, periodic_boundary=False)
+action = baseline(obs)
+```
+
+**Characteristics:**
+- **Degree-aware**: Selects neighbors based on their connectivity
+- **Implicit information flow**: Well-connected neighbors may have access to more swarm information
+- **Tie-breaking**: When multiple neighbors have the same degree, nearest neighbors are preferred
+
+**Implementation Details:**
+- Degree is computed as the total number of valid neighbors each agent has
+- Neighbors are sorted by degree (descending), then by distance (ascending) for tie-breaking
+- Handles cases where fewer than beta neighbors are available (selects all)
+- Padding agents are excluded from degree calculations
+
+**Use Cases:**
+- Studying the role of network topology in collective behavior
+- Comparing degree-based vs. distance-based selection
+- Investigating consensus formation through well-connected agents
+
+### 8. Modified Fixed Number of Neighbors (MFNN)
+
+Spatially-distributed neighbor selection with angular sectors, based on:
+
+**"Enhancing synchronization of self-propelled particles via modified rule of fixed number of neighbors"**
+
+This baseline divides the space around each agent into (k-1) equal angular sectors and selects the nearest neighbor in each sector. This ensures spatial diversity in neighbor selection, preventing clustering of selected neighbors in one direction.
+
+**Parameters:**
+- `k` (int): Maximum number of neighbors to select (space divided into k-1 sectors)
+- `periodic_boundary` (bool): Whether the environment uses periodic boundaries (default: False)
+- `boundary_size` (float, optional): Size of periodic boundary
+
+**Usage:**
+```python
+from baselines import ModifiedFixedNumberNeighbors
+
+baseline = ModifiedFixedNumberNeighbors(k=6, periodic_boundary=False)
+# This creates 5 angular sectors and selects nearest neighbor in each
+action = baseline(obs)
+```
+
+**Characteristics:**
+- **Spatial diversity**: Ensures neighbors are distributed across different directions
+- **Angular partitioning**: Divides 360° space into equal sectors
+- **Distance-based within sectors**: Selects nearest neighbor in each sector
+- **Adaptive selection**: May select fewer than k-1 neighbors if some sectors are empty
+
+**Implementation Details:**
+- Space is divided into k-1 equal angular sectors spanning [-π, π]
+- For each sector, the nearest neighbor (by Euclidean distance) is selected
+- Sectors are defined in the agent's local coordinate frame
+- Empty sectors (no neighbors) are skipped
+- Handles edge cases: fewer neighbors than sectors, padding agents
+
+**Use Cases:**
+- Ensuring balanced spatial coverage in neighbor selection
+- Preventing over-clustering in one direction
+- Studying the effect of spatial diversity on synchronization
+- Comparing with standard k-nearest which may cluster neighbors
+
 ## Factory Function
 
 A convenience factory function is provided to create baselines:
 
 ```python
 from baselines import create_baseline
+
+# Create Voronoi baseline
+baseline = create_baseline('voronoi')
 
 # Create random baseline
 baseline = create_baseline('random', selection_probability=0.5, seed=42)
@@ -181,6 +298,12 @@ baseline = create_baseline('farthest', k=3, periodic_boundary=False)
 # Create MTI baseline
 baseline = create_baseline('mti', k=5, distance_threshold=0.5,
                           threshold_a=0.1, threshold_b=0.5, seed=42)
+
+# Create highest-degree baseline
+baseline = create_baseline('highest_degree', beta=5)
+
+# Create MFNN baseline
+baseline = create_baseline('mfnn', k=6)
 ```
 
 ## Complete Example

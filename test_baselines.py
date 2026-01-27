@@ -14,6 +14,8 @@ from baselines import (
     FixedFarthestNeighborSelection,
     MetricTopologicalInteractionSelection,
     VoronoiNeighborSelection,
+    HighestDegreeNeighborSelection,
+    ModifiedFixedNumberNeighbors,
     create_baseline
 )
 
@@ -163,6 +165,22 @@ def main():
     baseline_mti_factory = create_baseline('mti', k=5, distance_threshold=0.6,
                                           threshold_a=0.15, threshold_b=0.4, seed=999)
     test_baseline(env, baseline_mti_factory, "MTI (via factory)", num_steps=10)
+
+    # Test 8: Highest-Degree Neighbor Selection
+    baseline_highest_degree = HighestDegreeNeighborSelection(beta=4, periodic_boundary=False)
+    test_baseline(env, baseline_highest_degree, "Highest-Degree Neighbor Selection (beta=4)", num_steps=10)
+
+    # Test 9: Modified Fixed Number of Neighbors (MFNN)
+    baseline_mfnn = ModifiedFixedNumberNeighbors(k=6, periodic_boundary=False)
+    test_baseline(env, baseline_mfnn, "Modified Fixed Number of Neighbors (k=6, 5 sectors)", num_steps=10)
+
+    # Test 10: Highest-Degree via factory
+    baseline_degree_factory = create_baseline('highest_degree', beta=3)
+    test_baseline(env, baseline_degree_factory, "Highest-Degree (via factory, beta=3)", num_steps=10)
+
+    # Test 11: MFNN via factory
+    baseline_mfnn_factory = create_baseline('mfnn', k=5)
+    test_baseline(env, baseline_mfnn_factory, "MFNN (via factory, k=5)", num_steps=10)
 
     print(f"\n{'='*60}")
     print("All tests completed successfully!")
