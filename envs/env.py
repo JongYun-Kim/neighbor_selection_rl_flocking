@@ -49,6 +49,11 @@ class EnvConfig(BaseModel):
     ignore_comm_lost_agents: bool = False
     periodic_boundary: bool = False
     task_type: str = 'acs'
+    # Observation type: 'ego_centric' (default) or 'centralized'
+    # 'ego_centric': each agent has its own local view (N, N, obs_dim) - relative positions/headings to neighbors
+    # 'centralized': all agents share the same global view - positions/headings relative to swarm center/avg heading
+    #                The centralized obs is replicated for each agent to maintain (N, N, obs_dim) shape
+    observation_type: str = 'ego_centric'
     # Vicsek specific parameters in the env
     alignment_goal: float = 0.97
     alignment_rate_goal: float = 0.03
@@ -274,6 +279,13 @@ class NeighborSelectionFlockingEnv(gym.Env):
         else:
             raise NotImplementedError("task_type must be either vicsek or acs at the moment")
 
+        # Observation type validation
+        assert self.config.env.observation_type in ["ego_centric", "centralized"], \
+            f"observation_type must be 'ego_centric' or 'centralized', got '{self.config.env.observation_type}'"
+        if self.config.env.observation_type == "centralized" and self.config.env.periodic_boundary:
+            warnings.warn("Centralized observation with periodic boundary is not fully tested; "
+                          "consider using ego_centric observation for periodic boundary environments.")
+
     def show_current_config(self):
         print('-------------------CURRENT CONFIG-------------------')
         print(pretty_print(self.config.dict()))
@@ -315,7 +327,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
         v = np.zeros((num_agents_max, 2), dtype=np.float64)  # (num_agents_max, 2)
         v[:num_agents, :] = v_
         th = np.zeros(num_agents_max, dtype=np.float64)  # (num_agents_max, )
-        th[:num_agents] = th_
+        th[:num_agents] = th_.squeeze()  # squeeze (num_agents, 1) -> (num_agents,)
         # Concatenate p v th
         agent_states = np.concatenate([p, v, th[:, np.newaxis]], axis=1)  # (num_agents_max, 5)
         # # padding_mask
@@ -950,10 +962,42 @@ class NeighborSelectionFlockingEnv(gym.Env):
         # neighbor_masks_with_self_loops = neighbor_masks.copy()
         # neighbor_masks_with_self_loops[active_agents_indices_2d] = 1
 
+        # Branch based on observation_type
+        obs_type = getattr(getattr(self.config, "env", None), "observation_type", None) or "ego_centric"
+        if obs_type == "centralized":
+            agents_obs = self._get_centralized_obs(state, active_agents_indices, padding_mask)
+        elif obs_type == "ego_centric":
+            agents_obs = self._get_ego_centric_obs(
+                rel_state, active_agents_indices, active_agents_indices_2d
+            )
+        else: # None is fine, but typo is not accepted!
+            raise ValueError(f"Invalid observation_type: {obs_type}")
+
+        # Construct observation
+        post_processed_obs = self.post_process_obs(agents_obs, neighbor_masks, padding_mask)
+        # # In case of post-processing applied
+        if post_processed_obs is not NotImplemented:
+            return post_processed_obs
+        # # In case of the base implementation (with no post-processing)
+        if self.config.env.env_mode == "single_env":
+            obs = {"local_agent_infos": agents_obs,     # (num_agents_max, num_agents_max, obs_dim)
+                   "neighbor_masks": neighbor_masks,    # (num_agents_max, num_agents_max)
+                   "padding_mask": padding_mask,        # (num_agents_max)
+                   "is_from_my_env": np.array(True, dtype=np.bool_),
+                   }
+            return obs
+        else:
+            raise ValueError(f"self.env_mode: 'single_env' / 'multi_env'; not {self.config.env.env_mode}; in get_obs()")
+
+    def _get_ego_centric_obs(self, rel_state, active_agents_indices, active_agents_indices_2d):
+        """
+        Get ego-centric observation: each agent has its own local view of neighbors' relative positions/headings.
+        Shape: (num_agents_max, num_agents_max, obs_dim)
+        """
+        # TODO: MUST BE UPDATED -- currently position coordinate uses relative in translation but absolute in rotation!!
         # (1) Get [x, y], [vx==cos(th), vy] in rel_state (active agents only)
         active_agents_rel_positions = rel_state["rel_agent_positions"][active_agents_indices_2d]  # (n, n, 2)
         active_agents_rel_headings = rel_state["rel_agent_headings"][active_agents_indices_2d]
-        # active_agents_rel_headings = wrap_to_pi(active_agents_rel_headings)  # MUST be wrapped to [-pi, pi]?
         active_agents_rel_headings = active_agents_rel_headings[:, :, np.newaxis]  # (num_agents, num_agents, 1)
 
         # (2) Map periodic to continuous space if necessary: [x, y] -> [cos(x), sin(x), cos(y), sin(y)]
@@ -976,30 +1020,64 @@ class NeighborSelectionFlockingEnv(gym.Env):
         agents_obs = np.zeros((self.num_agents_max, self.num_agents_max, self.config.env.obs_dim), dtype=np.float64)
         agents_obs[active_agents_indices_2d] = active_agents_obs  # (num_agents_max, num_agents_max, obs_dim)
 
-        # Construct observation
-        post_processed_obs = self.post_process_obs(agents_obs, neighbor_masks, padding_mask)
-        # # In case of post-processing applied
-        if post_processed_obs is not NotImplemented:
-            return post_processed_obs
-        # # In case of the base implementation (with no post-processing)
-        if self.config.env.env_mode == "single_env":
-            obs = {"local_agent_infos": agents_obs,     # (num_agents_max, num_agents_max, obs_dim)
-                   "neighbor_masks": neighbor_masks,    # (num_agents_max, num_agents_max)
-                   "padding_mask": padding_mask,        # (num_agents_max)
-                   "is_from_my_env": np.array(True, dtype=np.bool_),
-                   }
-            return obs
-        # elif self.config.env.env_mode == "multi_env":
-        #     multi_obs = {}
-        #     for i in range(self.num_agents_max):
-        #         multi_obs[self.config.env.agent_name_prefix + str(i)] = {
-        #             "centralized_agent_info": agent_observations[i],  # (obs_dim, )
-        #             "neighbor_mask": neighbor_masks[i],  # (num_agents_max, )
-        #             "padding_mask": padding_mask,      # (num_agents_max, )
-        #         }
-        #     return multi_obs
-        else:
-            raise ValueError(f"self.env_mode: 'single_env' / 'multi_env'; not {self.config.env.env_mode}; in get_obs()")
+        return agents_obs
+
+    def _get_centralized_obs(self, state, active_agents_indices, padding_mask):
+        """
+        Get centralized observation: all agents share the same global view.
+        Positions and headings are relative to the swarm center and average heading.
+        The single centralized obs (num_agents_max, obs_dim) is replicated to (num_agents_max, num_agents_max, obs_dim)
+        so each agent "row" sees the same global info for all agents (columns).
+        
+        This follows the same logic as lazy-message-listener-flocking's get_obs().
+        """
+        # Get positions and headings (active agents only)
+        active_agent_positions = state["agent_states"][:, :2][active_agents_indices]  # (num_agents, 2)
+        active_agent_headings = state["agent_states"][:, 4][active_agents_indices, np.newaxis]  # (num_agents, 1)
+        active_agent_headings = wrap_to_pi(active_agent_headings)  # MUST be wrapped to [-pi, pi] before averaging
+
+        # Transform to translation-rotation-invariant space (swarm coordinate system)
+        # # Compute swarm center and average heading
+        center = np.mean(active_agent_positions, axis=0)  # (2, )
+        average_heading = np.mean(active_agent_headings)  # scalar
+
+        # # Rotation matrix to rotate by -average_heading (align swarm heading to +X axis)
+        cos_neg_avg = np.cos(-average_heading)
+        sin_neg_avg = np.sin(-average_heading)
+        rot_mat = np.array([[cos_neg_avg, -sin_neg_avg],
+                            [sin_neg_avg, cos_neg_avg]])  # (2, 2)
+
+        # # Transform positions: translate to center, then rotate
+        active_p_transformed = active_agent_positions - center  # (num_agents, 2)
+        # Apply rotation: R @ p.T -> (2, num_agents), then transpose back
+        active_p_transformed = (rot_mat @ active_p_transformed.T).T  # (num_agents, 2)
+
+        # # Transform headings: relative to average heading
+        active_th_transformed = active_agent_headings - average_heading  # (num_agents, 1)
+
+        # # Concat [x, y, cos(th), sin(th)]
+        active_pvu = np.concatenate(
+            [active_p_transformed,  # (num_agents, 2)
+             np.cos(active_th_transformed),  # (num_agents, 1)
+             np.sin(active_th_transformed),  # (num_agents, 1)
+             ],
+            axis=1
+        )  # (num_agents, obs_dim=4)
+
+        # # Fill into (num_agents_max, obs_dim) with padding zeros
+        centralized_obs = np.zeros((self.num_agents_max, self.config.env.obs_dim), dtype=np.float64)
+        centralized_obs[padding_mask] = active_pvu  # (num_agents_max, obs_dim)
+
+        # # Normalize by [init_bound/2, init_bound/2, 1, 1] (same as legacy)
+        init_bound = self.config.control.initial_position_bound
+        centralized_obs[:, :2] /= (init_bound / 2)
+
+        # Replicate the centralized obs for each agent (row) to form (num_agents_max, num_agents_max, obs_dim)
+        # Each row i contains the same global observation of all agents
+        agents_obs = np.tile(centralized_obs[np.newaxis, :, :], (self.num_agents_max, 1, 1))
+        # agents_obs shape: (num_agents_max, num_agents_max, obs_dim)
+
+        return agents_obs
 
     def post_process_obs(self, agent_observations, neighbor_masks, padding_mask):
         """
