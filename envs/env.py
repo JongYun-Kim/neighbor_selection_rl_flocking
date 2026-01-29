@@ -1,15 +1,28 @@
 import os
 from copy import deepcopy
 import warnings
-import gym  # gym 0.23.1
-from gym.utils import seeding
-from gym.spaces import Box, Discrete, Dict, MultiDiscrete, MultiBinary
+try:
+    import gym  # gym 0.23.1
+    from gym.utils import seeding
+    from gym.spaces import Box, Discrete, Dict, MultiDiscrete, MultiBinary
+except ImportError:
+    import gymnasium as gym
+    from gymnasium.utils import seeding
+    from gymnasium.spaces import Box, Discrete, Dict, MultiDiscrete, MultiBinary
 import numpy as np  # numpy 1.23.4
-from ray.rllib.utils.typing import (
-    AgentID,
-    MultiAgentDict,
-)
-from ray.tune.logger import pretty_print
+try:
+    from ray.rllib.utils.typing import (
+        AgentID,
+        MultiAgentDict,
+    )
+    from ray.tune.logger import pretty_print
+except ImportError:
+    # Fallback for when ray is not available or partially installed
+    AgentID = str
+    MultiAgentDict = dict
+    def pretty_print(x):
+        import pprint
+        return pprint.pformat(x)
 from utils.utils import (wrap_to_pi, wrap_to_rectangle,
                               get_rel_pos_dist_in_periodic_boundary, map_periodic_to_continuous_space)
 from typing import List, Optional
@@ -67,6 +80,9 @@ class EnvConfig(BaseModel):
     acs_train_w_pos: float = 1.0
     acs_train_w_vel: float = 0.2
     acs_train_w_ctrl: float = 0.02
+    # ACS neighbor selection option: if True, neighbor selection (action) applies only to heading (alignment) control,
+    # while cohesion/separation uses the original (full) neighbor network
+    apply_to_heading_only: bool = False
 
 
 class Config(BaseModel):
@@ -629,7 +645,19 @@ class NeighborSelectionFlockingEnv(gym.Env):
         if self.config.env.task_type == "vicsek":
             control_inputs = self.get_vicsek_control(state, rel_state, lazy_listening_msg_masks)  # (num_agents_max, )
         elif self.config.env.task_type == "acs":
-            control_inputs = self.get_acs_control(state, rel_state, lazy_listening_msg_masks)  # (num_agents_max, )
+            # For ACS, pass original_network when apply_to_heading_only is True
+            # - new_network (lazy_listening_msg_masks): neighbor selection applied
+            # - original_network (state["neighbor_masks"]): original network before neighbor selection
+            if self.config.env.apply_to_heading_only:
+                control_inputs = self.get_acs_control(
+                    state, rel_state,
+                    new_network=lazy_listening_msg_masks,
+                    original_network=state["neighbor_masks"]
+                )  # (num_agents_max, )
+            else:
+                control_inputs = self.get_acs_control(
+                    state, rel_state, lazy_listening_msg_masks
+                )  # (num_agents_max, )
         else:
             raise NotImplementedError("task_type must be either vicsek or acs")
 
@@ -706,25 +734,33 @@ class NeighborSelectionFlockingEnv(gym.Env):
 
         return u
 
-    def get_acs_control(self, state, rel_state, new_network):
+    def get_acs_control(self, state, rel_state, new_network, original_network=None):
         """
         Get the control inputs based on the agent states using the ACS Model
+        :param state: dict containing agent_states, neighbor_masks, padding_mask
+        :param rel_state: dict containing relative positions, velocities, headings, distances
+        :param new_network: neighbor selection applied network (used for alignment, or all if apply_to_heading_only=False)
+        :param original_network: original network before neighbor selection (used for cohesion/separation when apply_to_heading_only=True)
         :return: u (num_agents_max)
-        """
-        """
-        Get the control inputs based on the agent states
-        :return: control_inputs (num_agents_max)
         """
         #  PLEASE WORK WITH ACTIVE AGENTS ONLY
 
-        # Get rel_pos, rel_dist, rel_vel, rel_ang, abs_ang, padding_mask, neighbor_masks
+        # Get rel_pos, rel_dist, rel_vel, rel_ang, abs_ang, padding_mask
         rel_pos = rel_state["rel_agent_positions"]   # (num_agents_max, num_agents_max, 2)
         rel_dist = rel_state["rel_agent_dists"]      # (num_agents_max, num_agents_max)
         rel_vel = rel_state["rel_agent_velocities"]  # (num_agents_max, num_agents_max, 2)
         rel_ang = rel_state["rel_agent_headings"]    # (num_agents_max, num_agents_max)
         abs_ang = state["agent_states"][:, 4]        # (num_agents_max, )
         padding_mask = state["padding_mask"]         # (num_agents_max)
-        neighbor_masks = new_network  # (num_agents_max, num_agents_max)
+
+        # Determine which network to use for each control component
+        # - Alignment (heading) control: always use new_network (neighbor selection applied)
+        # - Cohesion/Separation control: use original_network if apply_to_heading_only=True, else new_network
+        alignment_network = new_network  # (num_agents_max, num_agents_max)
+        if self.config.env.apply_to_heading_only and original_network is not None:
+            cohesion_network = original_network  # (num_agents_max, num_agents_max)
+        else:
+            cohesion_network = new_network  # (num_agents_max, num_agents_max)
 
         # Get data of the active agents
         active_agents_indices = np.nonzero(padding_mask)[0]  # (num_agents, )
@@ -734,8 +770,14 @@ class NeighborSelectionFlockingEnv(gym.Env):
         v = rel_vel[active_agents_indices_2d]  # (num_agents, num_agents, 2)
         th = rel_ang[active_agents_indices_2d]  # (num_agents, num_agents)
         th_i = abs_ang[padding_mask]  # (num_agents, )
-        net = neighbor_masks[active_agents_indices_2d]  # (num_agents, num_agents) may be no self-loops (i.e. 0 on diag)
-        N = (net + (np.eye(self.num_agents) * np.finfo(float).eps)).sum(axis=1)  # (num_agents, )
+
+        # Extract active agent networks
+        net_align = alignment_network[active_agents_indices_2d]  # (num_agents, num_agents); for alignment
+        net_coh = cohesion_network[active_agents_indices_2d]     # (num_agents, num_agents); for cohesion/separation
+
+        # Compute neighbor counts for each network (add eps for self-loop safety in case diag is 0)
+        N_align = (net_align + (np.eye(self.num_agents) * np.finfo(float).eps)).sum(axis=1)  # (num_agents, )
+        N_coh = (net_coh + (np.eye(self.num_agents) * np.finfo(float).eps)).sum(axis=1)      # (num_agents, )
 
         # Get control config
         beta = self.config.control.beta
@@ -747,16 +789,16 @@ class NeighborSelectionFlockingEnv(gym.Env):
         r0 = self.config.control.r0
         sig = self.config.control.sig
 
-        # 1. Compute Alignment Control Input
+        # 1. Compute Alignment Control Input (using alignment_network)
         # # u_cs = (lambda/n(N_i)) * sum_{j in N_i}[ psi(r_ij)sin(θ_j - θ_i) ],
         # # where N_i is the set of neighbors of agent i,
         # # psi(r_ij) = 1/(1+r_ij^2)^(beta),
         # # r_ij = ||X_j - X_i||, X_i = (x_i, y_i),
         psi = (1 + r**2)**(-beta)  # (num_agents, num_agents)
         alignment_error = np.sin(th)  # (num_agents, num_agents)
-        u_cs = (lam / N) * (psi * alignment_error * net).sum(axis=1)  # (num_agents, )
+        u_cs = (lam / N_align) * (psi * alignment_error * net_align).sum(axis=1)  # (num_agents, )
 
-        # 2. Compute Cohesion and Separation Control Input
+        # 2. Compute Cohesion and Separation Control Input (using cohesion_network)
         # # u_coh[i] = (sigma/N*V)
         # #            * sum_(j in N_i)
         # #               [
@@ -769,7 +811,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
         # # r_ij = ||X_j - X_i||, X_i = (x_i, y_i),
         # # rel_vel = (vx_j - vx_i, vy_j - vy_i),
         # # rel_pos = (x_j - x_i, y_j - y_i),
-        sig_NV = sig / (N * spd)  # (num_agents, )
+        sig_NV = sig / (N_coh * spd)  # (num_agents, )
         k1_2r2 = k1 / (2 * r**2)  # (num_agents, num_agents)
         k2_2r = k2 / (2 * r)  # (num_agents, num_agents)
         v_dot_p = np.einsum('ijk,ijk->ij', v, p)  # (num_agents, num_agents)
@@ -777,7 +819,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
         sin_th_i = -np.sin(th_i)  # (num_agents, )
         cos_th_i = np.cos(th_i)   # (num_agents, )
         dir_dot_p = sin_th_i[:, np.newaxis]*p[:, :, 0] + cos_th_i[:, np.newaxis]*p[:, :, 1]  # (num_agents, num_agents)
-        u_coh = sig_NV * np.sum((k1_2r2 * v_dot_p + k2_2r * r_minus_r0) * dir_dot_p * net, axis=1)  # (num_agents, )
+        u_coh = sig_NV * np.sum((k1_2r2 * v_dot_p + k2_2r * r_minus_r0) * dir_dot_p * net_coh, axis=1)  # (num_agents, )
 
         # 3. Saturation
         u_active = np.clip(u_cs + u_coh, -u_max, u_max)  # (num_agents, )
