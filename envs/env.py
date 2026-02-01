@@ -54,6 +54,11 @@ class EnvConfig(BaseModel):
     # 'centralized': all agents share the same global view - positions/headings relative to swarm center/avg heading
     #                The centralized obs is replicated for each agent to maintain (N, N, obs_dim) shape
     observation_type: str = 'ego_centric'
+    # Ego-centric observation rotation setting (only applies when observation_type='ego_centric')
+    # If True (default): relative positions are rotated to each agent's heading direction (heading = +x axis)
+    #                    This allows agents to distinguish front/back/left/right based on their heading
+    # If False: relative positions are simple world-frame translations (legacy behavior)
+    use_rotated_ego_obs: bool = True
     # Vicsek specific parameters in the env
     alignment_goal: float = 0.97
     alignment_rate_goal: float = 0.03
@@ -201,6 +206,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
                                          dtype=np.float64),
                 "neighbor_masks": Box(low=0, high=1, shape=(self.num_agents_max, self.num_agents_max), dtype=np.bool_),
                 "padding_mask": Box(low=0, high=1, shape=(self.num_agents_max,), dtype=np.bool_),
+                "absolute_headings": Box(low=-np.pi, high=np.pi, shape=(self.num_agents_max,), dtype=np.float64),
                 "is_from_my_env": Box(low=0, high=2, shape=(), dtype=np.float16),
             })
         elif self.config.env.env_mode == "multi_env":
@@ -968,10 +974,15 @@ class NeighborSelectionFlockingEnv(gym.Env):
             agents_obs = self._get_centralized_obs(state, active_agents_indices, padding_mask)
         elif obs_type == "ego_centric":
             agents_obs = self._get_ego_centric_obs(
-                rel_state, active_agents_indices, active_agents_indices_2d
+                state, rel_state, active_agents_indices, active_agents_indices_2d
             )
         else: # None is fine, but typo is not accepted!
             raise ValueError(f"Invalid observation_type: {obs_type}")
+
+        # Compute absolute headings for all agents (wrapped to [-pi, pi])
+        # Padding agents have heading = 0
+        absolute_headings = np.zeros(self.num_agents_max, dtype=np.float64)  # (num_agents_max,)
+        absolute_headings[padding_mask] = wrap_to_pi(state["agent_states"][padding_mask, 4])
 
         # Construct observation
         post_processed_obs = self.post_process_obs(agents_obs, neighbor_masks, padding_mask)
@@ -983,20 +994,52 @@ class NeighborSelectionFlockingEnv(gym.Env):
             obs = {"local_agent_infos": agents_obs,     # (num_agents_max, num_agents_max, obs_dim)
                    "neighbor_masks": neighbor_masks,    # (num_agents_max, num_agents_max)
                    "padding_mask": padding_mask,        # (num_agents_max)
+                   "absolute_headings": absolute_headings,  # (num_agents_max,) in radians [-pi, pi]
                    "is_from_my_env": np.array(True, dtype=np.bool_),
                    }
             return obs
         else:
             raise ValueError(f"self.env_mode: 'single_env' / 'multi_env'; not {self.config.env.env_mode}; in get_obs()")
 
-    def _get_ego_centric_obs(self, rel_state, active_agents_indices, active_agents_indices_2d):
+    def _get_ego_centric_obs(self, state, rel_state, active_agents_indices, active_agents_indices_2d):
         """
         Get ego-centric observation: each agent has its own local view of neighbors' relative positions/headings.
         Shape: (num_agents_max, num_agents_max, obs_dim)
+
+        If use_rotated_ego_obs is True (default):
+            Relative positions are rotated to each agent's heading direction (heading = +x axis).
+            This allows agents to distinguish front/back/left/right based on their heading.
+            For agent i looking at agent j:
+                x_ego = Δx * cos(θ_i) + Δy * sin(θ_i)   (positive = in front)
+                y_ego = -Δx * sin(θ_i) + Δy * cos(θ_i)  (positive = to the left)
+
+        If use_rotated_ego_obs is False:
+            Relative positions are simple world-frame translations (legacy behavior).
         """
-        # TODO: MUST BE UPDATED -- currently position coordinate uses relative in translation but absolute in rotation!!
-        # (1) Get [x, y], [vx==cos(th), vy] in rel_state (active agents only)
-        active_agents_rel_positions = rel_state["rel_agent_positions"][active_agents_indices_2d]  # (n, n, 2)
+        # (1) Get relative positions in world frame (active agents only)
+        rel_positions_world = rel_state["rel_agent_positions"][active_agents_indices_2d]  # (n, n, 2)
+
+        # (1.1) Transform relative positions based on config
+        use_rotated = getattr(self.config.env, "use_rotated_ego_obs", True)
+        if use_rotated:
+            # Transform to ego-centric coordinates (rotate to agent's heading)
+            active_agents_headings = state["agent_states"][active_agents_indices, 4]  # (n,)
+            cos_th = np.cos(active_agents_headings)  # (n,)
+            sin_th = np.sin(active_agents_headings)  # (n,)
+
+            rel_x = rel_positions_world[:, :, 0]  # (n, n)
+            rel_y = rel_positions_world[:, :, 1]  # (n, n)
+
+            # Rotate to ego-centric frame (heading direction becomes +x axis)
+            ego_rel_x = rel_x * cos_th[:, np.newaxis] + rel_y * sin_th[:, np.newaxis]  # (n, n)
+            ego_rel_y = -rel_x * sin_th[:, np.newaxis] + rel_y * cos_th[:, np.newaxis]  # (n, n)
+
+            active_agents_rel_positions = np.stack([ego_rel_x, ego_rel_y], axis=2)  # (n, n, 2)
+        else:
+            # Use world-frame relative positions (legacy behavior)
+            active_agents_rel_positions = rel_positions_world  # (n, n, 2)
+
+        # (1.2) Get relative headings
         active_agents_rel_headings = rel_state["rel_agent_headings"][active_agents_indices_2d]
         active_agents_rel_headings = active_agents_rel_headings[:, :, np.newaxis]  # (num_agents, num_agents, 1)
 
