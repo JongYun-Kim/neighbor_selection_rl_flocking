@@ -1,28 +1,15 @@
 import os
 from copy import deepcopy
 import warnings
-try:
-    import gym  # gym 0.23.1
-    from gym.utils import seeding
-    from gym.spaces import Box, Discrete, Dict, MultiDiscrete, MultiBinary
-except ImportError:
-    import gymnasium as gym
-    from gymnasium.utils import seeding
-    from gymnasium.spaces import Box, Discrete, Dict, MultiDiscrete, MultiBinary
+import gym  # gym 0.23.1
+from gym.utils import seeding
+from gym.spaces import Box, Discrete, Dict, MultiDiscrete, MultiBinary
 import numpy as np  # numpy 1.23.4
-try:
-    from ray.rllib.utils.typing import (
-        AgentID,
-        MultiAgentDict,
-    )
-    from ray.tune.logger import pretty_print
-except ImportError:
-    # Fallback for when ray is not available or partially installed
-    AgentID = str
-    MultiAgentDict = dict
-    def pretty_print(x):
-        import pprint
-        return pprint.pformat(x)
+from ray.rllib.utils.typing import (
+    AgentID,
+    MultiAgentDict,
+)
+from ray.tune.logger import pretty_print
 from utils.utils import (wrap_to_pi, wrap_to_rectangle,
                               get_rel_pos_dist_in_periodic_boundary, map_periodic_to_continuous_space)
 from typing import List, Optional

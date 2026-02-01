@@ -1,22 +1,12 @@
 import numpy as np
 from numpy.typing import NDArray
 from numpy import dtype
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+import torch
 #
 # RLlib from Ray
-try:
-    from ray.rllib.policy.policy import Policy
-    from ray.rllib.models import ModelCatalog
-    from ray.rllib.policy.sample_batch import SampleBatch
-    HAS_RLLIB = True
-except ImportError:
-    HAS_RLLIB = False
-    Policy = None
-    SampleBatch = None
+from ray.rllib.policy.policy import Policy
+from ray.rllib.models import ModelCatalog
+from ray.rllib.policy.sample_batch import SampleBatch
 from typing import Any, Dict, List, Type, Union
 
 
