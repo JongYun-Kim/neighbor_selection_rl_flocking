@@ -9,7 +9,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MPLBACKEND=Agg
 
 # system
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i -E 's#http://(archive|security)\.ubuntu\.com/ubuntu#https://\1.ubuntu.com/ubuntu#g' /etc/apt/sources.list \
+ && printf 'Acquire::Retries "5";\nAcquire::http::Timeout "10";\nAcquire::https::Timeout "10";\n' > /etc/apt/apt.conf.d/99net-tuning \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
     software-properties-common \
     ca-certificates curl wget git build-essential \
     sudo nano x11-apps \
@@ -121,12 +124,15 @@ RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt
 # connect to the host
 ARG UID=1000
 ARG GID=1000
+
 RUN groupadd -g ${GID} flocking || true \
- && useradd -m -s /bin/bash -u ${UID} -g ${GID} flocking \
+ && useradd -m -s /bin/bash -u ${UID} -g flocking flocking \
  && echo 'flocking:neighbor' | chpasswd \
  && mkdir -p /home/flocking/.ssh \
  && chown -R flocking:flocking /home/flocking/.ssh \
- && chmod 700 /home/flocking/.ssh
+ && chmod 700 /home/flocking/.ssh \
+ && echo "flocking ALL=(ALL) ALL" > /etc/sudoers.d/flocking \
+ && chmod 0440 /etc/sudoers.d/flocking
 # 필요하면 여기서 authorized_keys도 미리 심을 수 있음:
 # && touch /home/flocking/.ssh/authorized_keys \
 # && chown flocking:flocking /home/flocking/.ssh/authorized_keys \

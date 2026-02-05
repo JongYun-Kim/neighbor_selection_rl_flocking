@@ -54,6 +54,11 @@ class EnvConfig(BaseModel):
     # 'centralized': all agents share the same global view - positions/headings relative to swarm center/avg heading
     #                The centralized obs is replicated for each agent to maintain (N, N, obs_dim) shape
     observation_type: str = 'ego_centric'
+    # Ego-centric observation rotation setting (only applies when observation_type='ego_centric')
+    # If True (default): relative positions are rotated to each agent's heading direction (heading = +x axis)
+    #                    This allows agents to distinguish front/back/left/right based on their heading
+    # If False: relative positions are simple world-frame translations (legacy behavior)
+    use_rotated_ego_obs: bool = True
     # Vicsek specific parameters in the env
     alignment_goal: float = 0.97
     alignment_rate_goal: float = 0.03
@@ -67,6 +72,9 @@ class EnvConfig(BaseModel):
     acs_train_w_pos: float = 1.0
     acs_train_w_vel: float = 0.2
     acs_train_w_ctrl: float = 0.02
+    # ACS neighbor selection option: if True, neighbor selection (action) applies only to heading (alignment) control,
+    # while cohesion/separation uses the original (full) neighbor network
+    apply_to_heading_only: bool = False
 
 
 class Config(BaseModel):
@@ -209,6 +217,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
                                          dtype=np.float64),
                 "neighbor_masks": Box(low=0, high=1, shape=(self.num_agents_max, self.num_agents_max), dtype=np.bool_),
                 "padding_mask": Box(low=0, high=1, shape=(self.num_agents_max,), dtype=np.bool_),
+                "absolute_headings": Box(low=-np.pi, high=np.pi, shape=(self.num_agents_max,), dtype=np.float64),
                 "is_from_my_env": Box(low=0, high=2, shape=(), dtype=np.float16),
             })
         elif self.config.env.env_mode == "multi_env":
@@ -637,7 +646,19 @@ class NeighborSelectionFlockingEnv(gym.Env):
         if self.config.env.task_type == "vicsek":
             control_inputs = self.get_vicsek_control(state, rel_state, lazy_listening_msg_masks)  # (num_agents_max, )
         elif self.config.env.task_type == "acs":
-            control_inputs = self.get_acs_control(state, rel_state, lazy_listening_msg_masks)  # (num_agents_max, )
+            # For ACS, pass original_network when apply_to_heading_only is True
+            # - new_network (lazy_listening_msg_masks): neighbor selection applied
+            # - original_network (state["neighbor_masks"]): original network before neighbor selection
+            if self.config.env.apply_to_heading_only:
+                control_inputs = self.get_acs_control(
+                    state, rel_state,
+                    new_network=lazy_listening_msg_masks,
+                    original_network=state["neighbor_masks"]
+                )  # (num_agents_max, )
+            else:
+                control_inputs = self.get_acs_control(
+                    state, rel_state, lazy_listening_msg_masks
+                )  # (num_agents_max, )
         else:
             raise NotImplementedError("task_type must be either vicsek or acs")
 
@@ -714,25 +735,33 @@ class NeighborSelectionFlockingEnv(gym.Env):
 
         return u
 
-    def get_acs_control(self, state, rel_state, new_network):
+    def get_acs_control(self, state, rel_state, new_network, original_network=None):
         """
         Get the control inputs based on the agent states using the ACS Model
+        :param state: dict containing agent_states, neighbor_masks, padding_mask
+        :param rel_state: dict containing relative positions, velocities, headings, distances
+        :param new_network: neighbor selection applied network (used for alignment, or all if apply_to_heading_only=False)
+        :param original_network: original network before neighbor selection (used for cohesion/separation when apply_to_heading_only=True)
         :return: u (num_agents_max)
-        """
-        """
-        Get the control inputs based on the agent states
-        :return: control_inputs (num_agents_max)
         """
         #  PLEASE WORK WITH ACTIVE AGENTS ONLY
 
-        # Get rel_pos, rel_dist, rel_vel, rel_ang, abs_ang, padding_mask, neighbor_masks
+        # Get rel_pos, rel_dist, rel_vel, rel_ang, abs_ang, padding_mask
         rel_pos = rel_state["rel_agent_positions"]   # (num_agents_max, num_agents_max, 2)
         rel_dist = rel_state["rel_agent_dists"]      # (num_agents_max, num_agents_max)
         rel_vel = rel_state["rel_agent_velocities"]  # (num_agents_max, num_agents_max, 2)
         rel_ang = rel_state["rel_agent_headings"]    # (num_agents_max, num_agents_max)
         abs_ang = state["agent_states"][:, 4]        # (num_agents_max, )
         padding_mask = state["padding_mask"]         # (num_agents_max)
-        neighbor_masks = new_network  # (num_agents_max, num_agents_max)
+
+        # Determine which network to use for each control component
+        # - Alignment (heading) control: always use new_network (neighbor selection applied)
+        # - Cohesion/Separation control: use original_network if apply_to_heading_only=True, else new_network
+        alignment_network = new_network  # (num_agents_max, num_agents_max)
+        if self.config.env.apply_to_heading_only and original_network is not None:
+            cohesion_network = original_network  # (num_agents_max, num_agents_max)
+        else:
+            cohesion_network = new_network  # (num_agents_max, num_agents_max)
 
         # Get data of the active agents
         active_agents_indices = np.nonzero(padding_mask)[0]  # (num_agents, )
@@ -742,8 +771,14 @@ class NeighborSelectionFlockingEnv(gym.Env):
         v = rel_vel[active_agents_indices_2d]  # (num_agents, num_agents, 2)
         th = rel_ang[active_agents_indices_2d]  # (num_agents, num_agents)
         th_i = abs_ang[padding_mask]  # (num_agents, )
-        net = neighbor_masks[active_agents_indices_2d]  # (num_agents, num_agents) may be no self-loops (i.e. 0 on diag)
-        N = (net + (np.eye(self.num_agents) * np.finfo(float).eps)).sum(axis=1)  # (num_agents, )
+
+        # Extract active agent networks
+        net_align = alignment_network[active_agents_indices_2d]  # (num_agents, num_agents); for alignment
+        net_coh = cohesion_network[active_agents_indices_2d]     # (num_agents, num_agents); for cohesion/separation
+
+        # Compute neighbor counts for each network (add eps for self-loop safety in case diag is 0)
+        N_align = (net_align + (np.eye(self.num_agents) * np.finfo(float).eps)).sum(axis=1)  # (num_agents, )
+        N_coh = (net_coh + (np.eye(self.num_agents) * np.finfo(float).eps)).sum(axis=1)      # (num_agents, )
 
         # Get control config
         beta = self.config.control.beta
@@ -755,16 +790,16 @@ class NeighborSelectionFlockingEnv(gym.Env):
         r0 = self.config.control.r0
         sig = self.config.control.sig
 
-        # 1. Compute Alignment Control Input
+        # 1. Compute Alignment Control Input (using alignment_network)
         # # u_cs = (lambda/n(N_i)) * sum_{j in N_i}[ psi(r_ij)sin(θ_j - θ_i) ],
         # # where N_i is the set of neighbors of agent i,
         # # psi(r_ij) = 1/(1+r_ij^2)^(beta),
         # # r_ij = ||X_j - X_i||, X_i = (x_i, y_i),
         psi = (1 + r**2)**(-beta)  # (num_agents, num_agents)
         alignment_error = np.sin(th)  # (num_agents, num_agents)
-        u_cs = (lam / N) * (psi * alignment_error * net).sum(axis=1)  # (num_agents, )
+        u_cs = (lam / N_align) * (psi * alignment_error * net_align).sum(axis=1)  # (num_agents, )
 
-        # 2. Compute Cohesion and Separation Control Input
+        # 2. Compute Cohesion and Separation Control Input (using cohesion_network)
         # # u_coh[i] = (sigma/N*V)
         # #            * sum_(j in N_i)
         # #               [
@@ -777,7 +812,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
         # # r_ij = ||X_j - X_i||, X_i = (x_i, y_i),
         # # rel_vel = (vx_j - vx_i, vy_j - vy_i),
         # # rel_pos = (x_j - x_i, y_j - y_i),
-        sig_NV = sig / (N * spd)  # (num_agents, )
+        sig_NV = sig / (N_coh * spd)  # (num_agents, )
         k1_2r2 = k1 / (2 * r**2)  # (num_agents, num_agents)
         k2_2r = k2 / (2 * r)  # (num_agents, num_agents)
         v_dot_p = np.einsum('ijk,ijk->ij', v, p)  # (num_agents, num_agents)
@@ -785,7 +820,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
         sin_th_i = -np.sin(th_i)  # (num_agents, )
         cos_th_i = np.cos(th_i)   # (num_agents, )
         dir_dot_p = sin_th_i[:, np.newaxis]*p[:, :, 0] + cos_th_i[:, np.newaxis]*p[:, :, 1]  # (num_agents, num_agents)
-        u_coh = sig_NV * np.sum((k1_2r2 * v_dot_p + k2_2r * r_minus_r0) * dir_dot_p * net, axis=1)  # (num_agents, )
+        u_coh = sig_NV * np.sum((k1_2r2 * v_dot_p + k2_2r * r_minus_r0) * dir_dot_p * net_coh, axis=1)  # (num_agents, )
 
         # 3. Saturation
         u_active = np.clip(u_cs + u_coh, -u_max, u_max)  # (num_agents, )
@@ -976,10 +1011,15 @@ class NeighborSelectionFlockingEnv(gym.Env):
             agents_obs = self._get_centralized_obs(state, active_agents_indices, padding_mask)
         elif obs_type == "ego_centric":
             agents_obs = self._get_ego_centric_obs(
-                rel_state, active_agents_indices, active_agents_indices_2d
+                state, rel_state, active_agents_indices, active_agents_indices_2d
             )
         else: # None is fine, but typo is not accepted!
             raise ValueError(f"Invalid observation_type: {obs_type}")
+
+        # Compute absolute headings for all agents (wrapped to [-pi, pi])
+        # Padding agents have heading = 0
+        absolute_headings = np.zeros(self.num_agents_max, dtype=np.float64)  # (num_agents_max,)
+        absolute_headings[padding_mask] = wrap_to_pi(state["agent_states"][padding_mask, 4])
 
         # Construct observation
         post_processed_obs = self.post_process_obs(agents_obs, neighbor_masks, padding_mask)
@@ -991,20 +1031,52 @@ class NeighborSelectionFlockingEnv(gym.Env):
             obs = {"local_agent_infos": agents_obs,     # (num_agents_max, num_agents_max, obs_dim)
                    "neighbor_masks": neighbor_masks,    # (num_agents_max, num_agents_max)
                    "padding_mask": padding_mask,        # (num_agents_max)
+                   "absolute_headings": absolute_headings,  # (num_agents_max,) in radians [-pi, pi]
                    "is_from_my_env": np.array(True, dtype=np.bool_),
                    }
             return obs
         else:
             raise ValueError(f"self.env_mode: 'single_env' / 'multi_env'; not {self.config.env.env_mode}; in get_obs()")
 
-    def _get_ego_centric_obs(self, rel_state, active_agents_indices, active_agents_indices_2d):
+    def _get_ego_centric_obs(self, state, rel_state, active_agents_indices, active_agents_indices_2d):
         """
         Get ego-centric observation: each agent has its own local view of neighbors' relative positions/headings.
         Shape: (num_agents_max, num_agents_max, obs_dim)
+
+        If use_rotated_ego_obs is True (default):
+            Relative positions are rotated to each agent's heading direction (heading = +x axis).
+            This allows agents to distinguish front/back/left/right based on their heading.
+            For agent i looking at agent j:
+                x_ego = Δx * cos(θ_i) + Δy * sin(θ_i)   (positive = in front)
+                y_ego = -Δx * sin(θ_i) + Δy * cos(θ_i)  (positive = to the left)
+
+        If use_rotated_ego_obs is False:
+            Relative positions are simple world-frame translations (legacy behavior).
         """
-        # TODO: MUST BE UPDATED -- currently position coordinate uses relative in translation but absolute in rotation!!
-        # (1) Get [x, y], [vx==cos(th), vy] in rel_state (active agents only)
-        active_agents_rel_positions = rel_state["rel_agent_positions"][active_agents_indices_2d]  # (n, n, 2)
+        # (1) Get relative positions in world frame (active agents only)
+        rel_positions_world = rel_state["rel_agent_positions"][active_agents_indices_2d]  # (n, n, 2)
+
+        # (1.1) Transform relative positions based on config
+        use_rotated = getattr(self.config.env, "use_rotated_ego_obs", True)
+        if use_rotated:
+            # Transform to ego-centric coordinates (rotate to agent's heading)
+            active_agents_headings = state["agent_states"][active_agents_indices, 4]  # (n,)
+            cos_th = np.cos(active_agents_headings)  # (n,)
+            sin_th = np.sin(active_agents_headings)  # (n,)
+
+            rel_x = rel_positions_world[:, :, 0]  # (n, n)
+            rel_y = rel_positions_world[:, :, 1]  # (n, n)
+
+            # Rotate to ego-centric frame (heading direction becomes +x axis)
+            ego_rel_x = rel_x * cos_th[:, np.newaxis] + rel_y * sin_th[:, np.newaxis]  # (n, n)
+            ego_rel_y = -rel_x * sin_th[:, np.newaxis] + rel_y * cos_th[:, np.newaxis]  # (n, n)
+
+            active_agents_rel_positions = np.stack([ego_rel_x, ego_rel_y], axis=2)  # (n, n, 2)
+        else:
+            # Use world-frame relative positions (legacy behavior)
+            active_agents_rel_positions = rel_positions_world  # (n, n, 2)
+
+        # (1.2) Get relative headings
         active_agents_rel_headings = rel_state["rel_agent_headings"][active_agents_indices_2d]
         active_agents_rel_headings = active_agents_rel_headings[:, :, np.newaxis]  # (num_agents, num_agents, 1)
 
