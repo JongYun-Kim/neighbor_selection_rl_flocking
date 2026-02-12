@@ -203,9 +203,17 @@ class NeighborSelectionFlockingEnv(gym.Env):
 
         # Define OBSERVATION SPACE
         if self.config.env.env_mode == "single_env":
+            # Observation shape depends on observation_type:
+            # - 'ego_centric': (num_agents_max, num_agents_max, obs_dim) - each agent has its own local view
+            # - 'centralized': (num_agents_max, obs_dim) - single global view shared by all agents
+            if self.config.env.observation_type == "centralized":
+                obs_shape = (self.num_agents_max, self.config.env.obs_dim)
+            else:  # ego_centric (default)
+                obs_shape = (self.num_agents_max, self.num_agents_max, self.config.env.obs_dim)
+            
             self.observation_space = Dict({
                 "local_agent_infos": Box(low=-np.inf, high=np.inf,
-                                         shape=(self.num_agents_max, self.num_agents_max, self.config.env.obs_dim),
+                                         shape=obs_shape,
                                          dtype=np.float64),
                 "neighbor_masks": Box(low=0, high=1, shape=(self.num_agents_max, self.num_agents_max), dtype=np.bool_),
                 "padding_mask": Box(low=0, high=1, shape=(self.num_agents_max,), dtype=np.bool_),
@@ -1144,12 +1152,10 @@ class NeighborSelectionFlockingEnv(gym.Env):
         init_bound = self.config.control.initial_position_bound
         centralized_obs[:, :2] /= (init_bound / 2)
 
-        # Replicate the centralized obs for each agent (row) to form (num_agents_max, num_agents_max, obs_dim)
-        # Each row i contains the same global observation of all agents
-        agents_obs = np.tile(centralized_obs[np.newaxis, :, :], (self.num_agents_max, 1, 1))
-        # agents_obs shape: (num_agents_max, num_agents_max, obs_dim)
-
-        return agents_obs
+        # Return centralized obs directly as (num_agents_max, obs_dim)
+        # No tiling - all agents share the same global view
+        # This is more memory efficient and matches the legacy implementation
+        return centralized_obs  # (num_agents_max, obs_dim)
 
     def post_process_obs(self, agent_observations, neighbor_masks, padding_mask):
         """
