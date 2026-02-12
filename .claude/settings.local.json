@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(python test_baselines.py:*)",
+      "Bash(python verify_visual_attention.py:*)",
+      "Bash(python:*)"
+    ]
+  }
+}

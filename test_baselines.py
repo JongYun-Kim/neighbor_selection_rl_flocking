@@ -16,6 +16,10 @@ from baselines import (
     VoronoiNeighborSelection,
     HighestDegreeNeighborSelection,
     ModifiedFixedNumberNeighbors,
+    VisualAttentionNeighborSelection,
+    ActiveSearchNeighborSelection,
+    GazingPreferenceNeighborSelection,
+    MotionSalienceThresholdSelection,
     create_baseline
 )
 
@@ -181,6 +185,89 @@ def main():
     # Test 11: MFNN via factory
     baseline_mfnn_factory = create_baseline('mfnn', k=5)
     test_baseline(env, baseline_mfnn_factory, "MFNN (via factory, k=5)", num_steps=10)
+
+    # Test 12: Visual Attention Neighbor Selection
+    baseline_visual_attention = VisualAttentionNeighborSelection(
+        selection_preference=1.0,
+        robot_radius=1.0,
+        seed=42
+    )
+    test_baseline(env, baseline_visual_attention, "Visual Attention (DLN-S, alpha=1.0)", num_steps=10)
+
+    # Test 13: Visual Attention via factory
+    baseline_visual_factory = create_baseline('visual_attention',
+                                             selection_preference=1.0,
+                                             robot_radius=1.0,
+                                             seed=42)
+    test_baseline(env, baseline_visual_factory, "Visual Attention (via factory)", num_steps=10)
+
+    # Test 14: Active Search Neighbor Selection
+    baseline_active_search = ActiveSearchNeighborSelection(
+        time_window=10,
+        alignment_enabled=True,
+        search_enabled=True,
+        seed=42
+    )
+    test_baseline(env, baseline_active_search, "Active Search (time_window=10)", num_steps=10)
+
+    # Test 15: Active Search via factory
+    baseline_active_factory = create_baseline('active_search',
+                                             time_window=10,
+                                             alignment_enabled=True,
+                                             seed=42)
+    test_baseline(env, baseline_active_factory, "Active Search (via factory)", num_steps=10)
+
+    # Test 16: Gazing Preference Neighbor Selection (Counterclockwise milling)
+    baseline_gazing_ccw = GazingPreferenceNeighborSelection(
+        theta_g=np.pi/3,  # 60 degrees, counterclockwise
+        lambda_coef=3.0,
+        beta=0.5,
+        seed=42
+    )
+    test_baseline(env, baseline_gazing_ccw, "Gazing Preference (θ^g=π/3, CCW milling)", num_steps=10)
+
+    # Test 17: Gazing Preference Neighbor Selection (Clockwise milling)
+    baseline_gazing_cw = GazingPreferenceNeighborSelection(
+        theta_g=-np.pi/3,  # -60 degrees, clockwise
+        lambda_coef=3.0,
+        beta=0.5,
+        seed=42
+    )
+    test_baseline(env, baseline_gazing_cw, "Gazing Preference (θ^g=-π/3, CW milling)", num_steps=10)
+
+    # Test 18: Gazing Preference via factory
+    baseline_gazing_factory = create_baseline('gazing_preference',
+                                             theta_g=np.pi/4,
+                                             lambda_coef=5.0,
+                                             seed=42)
+    test_baseline(env, baseline_gazing_factory, "Gazing Preference (via factory)", num_steps=10)
+
+    # Test 19: Motion Salience Threshold Selection (MST, C=1.0)
+    baseline_mst = MotionSalienceThresholdSelection(
+        motion_salience_threshold=1.0,
+        velocity_diff_threshold=0.2,
+        k_neighbors=7,
+        seed=42
+    )
+    baseline_mst.set_env(env)  # REQUIRED: set environment reference
+    test_baseline(env, baseline_mst, "Motion Salience (C=1.0, k=7)", num_steps=10)
+
+    # Test 20: Motion Salience with different threshold
+    baseline_mst_high = MotionSalienceThresholdSelection(
+        motion_salience_threshold=5.0,  # Higher threshold
+        k_neighbors=5,
+        seed=42
+    )
+    baseline_mst_high.set_env(env)
+    test_baseline(env, baseline_mst_high, "Motion Salience (C=5.0, k=5)", num_steps=10)
+
+    # Test 21: Motion Salience via factory
+    baseline_mst_factory = create_baseline('motion_salience',
+                                          motion_salience_threshold=2.0,
+                                          k_neighbors=7,
+                                          seed=42)
+    baseline_mst_factory.set_env(env)
+    test_baseline(env, baseline_mst_factory, "Motion Salience (via factory)", num_steps=10)
 
     print(f"\n{'='*60}")
     print("All tests completed successfully!")
