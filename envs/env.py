@@ -1201,7 +1201,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
                         last_n_spatial_entropies = self.spatial_entropy_hist[self.time_step - effective_win_len:self.time_step + 1]
                         last_n_velocity_entropies = self.velocity_entropy_hist[self.time_step - effective_win_len:self.time_step + 1]
                         spatial_entropy_rate = np.max(last_n_spatial_entropies) - np.min(last_n_spatial_entropies)
-                        velocity_entropy_rate = np.max(last_n_velocity_entropies)
+                        velocity_entropy_rate = np.max(last_n_velocity_entropies) - np.min(last_n_velocity_entropies)
                         if (spatial_entropy_rate < self.config.env.entropy_p_rate_goal) and (velocity_entropy_rate < self.config.env.entropy_v_rate_goal):
                             done = True
         else:
@@ -1257,14 +1257,14 @@ class NeighborSelectionFlockingEnv(gym.Env):
             # Get spatial entropy errors
             std_pos = self.spatial_entropy_hist[self.time_step]  # scalar
             std_pos_target = self.config.env.entropy_p_goal - 2.5
-            std_pos_error = (std_pos - std_pos_target) ** 2  # (100-40)**2 = 3600
-            pos_error_reward = - (1 / 3600) * np.maximum(std_pos_error, 0)
+            std_pos_error = np.maximum(std_pos - std_pos_target, 0.0) ** 2  # (100-40)**2 = 3600
+            pos_error_reward = - (1 / 3600) * std_pos_error
 
             # Get velocity entropy errors
             std_vel = self.velocity_entropy_hist[self.time_step]
             std_vel_target = self.config.env.entropy_v_goal - 0.05
-            std_vel_error = (std_vel - std_vel_target) ** 2  # (15-0.05)**2 = 223.5052
-            vel_error_reward = - (1 / 220) * np.maximum(std_vel_error, 0.0)
+            std_vel_error = np.maximum(std_vel - std_vel_target, 0.0) ** 2  # (15-0.05)**2 = 223.5052
+            vel_error_reward = - (1 / 220) * std_vel_error
 
             # Get control cost
             rho = self.config.control.rho

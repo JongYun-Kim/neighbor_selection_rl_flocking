@@ -8,8 +8,8 @@ from models.ppo import NeighborSelectionPPORLlib
 
 if __name__ == "__main__":
 
-    # enable_debugging = False
-    enable_debugging = True
+    enable_debugging = False
+    # enable_debugging = True
 
     if enable_debugging:
         ray.init(local_mode=True)
@@ -96,6 +96,7 @@ if __name__ == "__main__":
     tune.run(
         "PPO",
         name="neighbor_selection_test_260205",
+        local_dir="/workspace/test_results",
         # resume=True,
         checkpoint_freq=8,
         keep_checkpoints_num=32,
@@ -115,7 +116,7 @@ if __name__ == "__main__":
             "rollout_fragment_length": 1024,
             "train_batch_size": 16384,
             "sgd_minibatch_size": 256,
-            "num_sgd_iter": 10,
+            "num_sgd_iter": 32,
             "lr": 2e-5,
             "lr_schedule": [[0, 2e-5],
                             [1e7, 1e-7],],
