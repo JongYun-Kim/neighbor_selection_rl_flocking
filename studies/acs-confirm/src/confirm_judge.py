@@ -18,9 +18,12 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-STUDY = "/workspace/studies/acs-confirm"
-R2 = "/workspace/studies/acs-robust-r2/data"
-R3 = "/workspace/studies/acs-robust-r3-stress/data"
+import os as _os
+_ROOT = _os.environ.get("FLOCK_ROOT") or _os.path.dirname(_os.path.dirname(
+    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+STUDY = _os.path.join(_ROOT, "studies", "acs-confirm")
+R2 = _os.path.join(_ROOT, "studies", "acs-robust-r2", "data")
+R3 = _os.path.join(_ROOT, "studies", "acs-robust-r3-stress", "data")
 
 FRESH_N20 = (1500, 1999)   # arms (1): fresh seeds, N=20
 NAXIS = (1000, 1499)       # arms (3): N-axis seeds (pair with r3 refs)

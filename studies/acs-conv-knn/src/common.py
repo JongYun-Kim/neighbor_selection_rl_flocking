@@ -34,7 +34,7 @@ if REPO not in sys.path:
 from envs.env import NeighborSelectionFlockingEnv, load_config, config_to_env_input  # noqa: E402
 from baselines import create_baseline  # noqa: E402
 
-DEFAULT_YAML = "/workspace/envs/default_env_config.yaml"
+DEFAULT_YAML = os.path.join(REPO, "envs", "default_env_config.yaml")
 
 SERIES_NAMES = [
     "s_ent",        # spatial entropy, own computation (m)
@@ -169,9 +169,16 @@ def rollout(policy, cfg, seed, pos_stride=10, extra_meta=None):
         action = policy(obs)
         obs, reward, done, info = env.step(action)
         t += 1
-        pos = log_step(t, action, info)
+        # Selection-graph series use the REALIZED (N,N) mask. For binary
+        # policies that is the action itself; for non-binary encodings
+        # (e.g. dynamic_k_nn pointers) the env reports the converted mask in
+        # info["binary_action"] when cfg.env.evaluation_diagnostics is on.
+        a_mask = action
+        if info is not None and "binary_action" in info:
+            a_mask = info["binary_action"]
+        pos = log_step(t, a_mask, info)
         rec["reward"][t] = reward
-        a = action[np.ix_(act_idx, act_idx)].astype(bool)
+        a = a_mask[np.ix_(act_idx, act_idx)].astype(bool)
         edges = a & ~np.eye(n, dtype=bool)
         if prev_edges is not None:
             inter = (edges & prev_edges).sum()

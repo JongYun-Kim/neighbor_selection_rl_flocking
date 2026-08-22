@@ -89,12 +89,86 @@ class C2Policy:
             return np.argmax(lg, axis=-1).astype(np.int8)
 
 
+class DknnC2Policy:
+    """Deterministic (argmax) cutoff-pointer policy from a dynamic_k_nn
+    checkpoint: per-ego N-way argmax over pointer logits -> (N,) int64 pointer,
+    fed to the env as-is (mask conversion happens inside the env)."""
+
+    def __init__(self, checkpoint_path, env, custom_model_config):
+        import pickle
+        import torch
+        self.torch = torch
+        from models.ppo_dynamic_k_nn import DynamicKNNPPORLlib
+        N = env.num_agents_max
+        self.model = DynamicKNNPPORLlib(
+            obs_space=env.observation_space, action_space=env.action_space,
+            num_outputs=N * N,
+            model_config={"custom_model_config": custom_model_config},
+            name="eval_policy")
+        with open(os.path.join(checkpoint_path, "policies", "default_policy",
+                               "policy_state.pkl"), "rb") as f:
+            state = pickle.load(f)
+        torch_state = {k: torch.from_numpy(v) if isinstance(v, np.ndarray) else v
+                       for k, v in state["weights"].items()}
+        missing, unexpected = self.model.load_state_dict(torch_state, strict=False)
+        if missing or unexpected:
+            print(f"WARN load_state_dict: missing={missing} unexpected={unexpected}")
+        self.model.eval()
+        self.N = N
+
+    def __call__(self, obs):
+        torch = self.torch
+        with torch.no_grad():
+            t = {
+                "local_agent_infos": torch.from_numpy(obs["local_agent_infos"][None]).float(),
+                "neighbor_masks": torch.from_numpy(obs["neighbor_masks"][None]).float(),
+                "padding_mask": torch.from_numpy(obs["padding_mask"][None]).float(),
+                "is_from_my_env": torch.from_numpy(np.array([True])),
+            }
+            logits, _ = self.model.forward({"obs": t}, state=[], seq_lens=None)
+            lg = logits.numpy()[0].reshape(self.N, self.N)
+            return np.argmax(lg, axis=-1).astype(np.int64)
+
+
+def induced_mask_from_obs(obs, pointer):
+    """Replicate the env's cutoff-pointer -> (N,N) mask conversion from the
+    observation (obs distances = world distances x 2/L; the '<=' cutoff rule
+    is scale-invariant). Diagnostics-grade twin of env info['binary_action']."""
+    pm = obs["padding_mask"].astype(bool)
+    N = pm.shape[0]
+    rel = obs["local_agent_infos"][:, :, :2].astype(np.float64)
+    d = np.sqrt((rel ** 2).sum(-1))  # (N, N) ego-row distances, self = 0
+    mask = np.zeros((N, N), dtype=np.int8)
+    for i in np.where(pm)[0]:
+        thr = d[i, pointer[i]]
+        row = pm & (d[i] <= thr)
+        row[i] = True
+        mask[i] = row.astype(np.int8)
+    return mask
+
+
+def load_policy(checkpoint_path, env):
+    """params.json-driven method dispatch (Q8/B6 adapter)."""
+    params_path = os.path.join(os.path.dirname(checkpoint_path), "params.json")
+    with open(params_path) as f:
+        params = json.load(f)
+    custom_model = params.get("model", {}).get("custom_model", "")
+    action_type = (params.get("env_config", {}).get("config", {})
+                   .get("env", {}).get("action_type", "binary_vector"))
+    if custom_model == "dynamic_k_nn_neighbor_selector_rl" or action_type == "dynamic_k_nn":
+        mc = params["model"]["custom_model_config"]
+        return DknnC2Policy(checkpoint_path, env, mc)
+    return C2Policy(checkpoint_path, env)
+
+
 class ForensicsWrapper:
     """Wraps a policy; records per-step rank-deviation + per-agent degree.
 
     rank_dev[t] = mean over active agents of the fraction of selected off-diag
     edges NOT inside that agent's nearest-deg_i distance set (0 == exact k-NN
-    mimicry with per-agent k=deg_i).
+    mimicry with per-agent k=deg_i). For pointer policies the selection mask is
+    reconstructed from the observation (induced_mask_from_obs); the env applies
+    its own conversion to the physics.
     """
 
     def __init__(self, policy):
@@ -109,7 +183,8 @@ class ForensicsWrapper:
         rel = obs["local_agent_infos"][np.ix_(act, act)][:, :, :2]
         d2 = (rel ** 2).sum(-1)
         np.fill_diagonal(d2, np.inf)
-        sel = a[np.ix_(act, act)].astype(bool)
+        sel_full = a if a.ndim == 2 else induced_mask_from_obs(obs, a)
+        sel = sel_full[np.ix_(act, act)].astype(bool)
         np.fill_diagonal(sel, False)
         n = len(act)
         devs, degs = [], []
@@ -174,19 +249,32 @@ def run_one(args):
     from common import build_config, rollout, save_run
 
     cfg = build_config(n_agents=n_agents, max_steps=steps, initial_position_bound=bound)
-    cfg.env.expose_aux_target = True
-    cfg.env.expose_global_stats = True
+    # Method dispatch (B6): the checkpoint's params.json names the model and
+    # action encoding; the eval env mirrors the training obs/action wiring.
+    with open(os.path.join(os.path.dirname(ckpt), "params.json")) as f:
+        _params = json.load(f)
+    _penv = _params.get("env_config", {}).get("config", {}).get("env", {})
+    _is_dknn = (_params.get("model", {}).get("custom_model", "")
+                == "dynamic_k_nn_neighbor_selector_rl"
+                or _penv.get("action_type") == "dynamic_k_nn")
+    if _is_dknn:
+        cfg.env.action_type = "dynamic_k_nn"
+        # env-side realized-mask reporting: selection-graph series and any
+        # downstream forensics use the env's own pointer->mask conversion
+        cfg.env.evaluation_diagnostics = True
+        cfg.env.expose_aux_target = False
+        cfg.env.expose_global_stats = False
+    else:
+        cfg.env.expose_aux_target = True
+        cfg.env.expose_global_stats = True
     # Scale-robustness study: the eval env must observe in the SAME scale
     # system the checkpoint was trained with. Read it from the run's
     # params.json (old checkpoints lack the field -> legacy). The L pool is
     # never set in eval builds — L comes fixed from --bound.
-    with open(os.path.join(os.path.dirname(ckpt), "params.json")) as f:
-        _params = json.load(f)
-    cfg.env.obs_position_scale = (_params.get("env_config", {}).get("config", {})
-                                  .get("env", {}).get("obs_position_scale", "legacy"))
+    cfg.env.obs_position_scale = _penv.get("obs_position_scale", "legacy")
     assert cfg.env.initial_position_bound_pool is None
     tmp_env = NeighborSelectionFlockingEnv(config_to_env_input(cfg, seed_id=0))
-    policy = ForensicsWrapper(C2Policy(ckpt, tmp_env))
+    policy = ForensicsWrapper(load_policy(ckpt, tmp_env))
     rec, snaps, ts, meta = rollout(policy, cfg, seed, pos_stride=10,
                                    extra_meta=dict(policy=label, ckpt=ckpt))
     rec["rank_dev"] = np.concatenate([[np.nan], np.array(policy.rank_dev, dtype=np.float32)])

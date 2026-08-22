@@ -6,16 +6,19 @@ G2: fresh-runner C1(pi_E)@L250 seeds 1000-1003 must match the r3 archive:
     bit-exact arrays where possible, and judged t_fire equal / dJ == 0.
 """
 import json
+import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, "/workspace/studies/acs-confirm/src")
+_ROOT = os.environ.get("FLOCK_ROOT") or os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(_ROOT, "studies", "acs-confirm", "src"))
 from eval_c2_r3 import t_fire_c2  # noqa: E402
 
-CONFIRM = "/workspace/studies/acs-confirm/data"
-R2 = "/workspace/studies/acs-robust-r2/data"
-R3 = "/workspace/studies/acs-robust-r3-stress/data"
+CONFIRM = os.path.join(_ROOT, "studies", "acs-confirm", "data")
+R2 = os.path.join(_ROOT, "studies", "acs-robust-r2", "data")
+R3 = os.path.join(_ROOT, "studies", "acs-robust-r3-stress", "data")
 
 
 def arrays_equal(a, b):
