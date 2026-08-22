@@ -58,6 +58,9 @@ _ap.add_argument("--lr-end", type=float, default=None,
 _ap.add_argument("--grad-clip", type=float, default=None)
 _ap.add_argument("--entropy-coeff", type=float, default=None)
 _ap.add_argument("--clip-param", type=float, default=None)
+_ap.add_argument("--entropy-penalty", type=float, default=None,
+                 help="dknn only: pointer-entropy penalty coef applied in "
+                      "custom_loss (RLlib forbids entropy_coeff < 0)")
 _ap.add_argument("--minibatch", type=int, default=None)
 _ap.add_argument("--sgd-iter", type=int, default=None)
 _ap.add_argument("--workers", type=int, default=None)
@@ -245,6 +248,13 @@ def main():
             "dknn_legacy is defined for preservation only (plan Q3/Q4 rider); "
             "pass --allow-legacy to actually run it.")
 
+    if ARGS.entropy_penalty is not None:
+        if prof["method"] != "dynamic_knn":
+            raise SystemExit("--entropy-penalty is a dknn-only probe knob")
+        prof = dict(prof)
+        prof["model_config"] = {**prof["model_config"],
+                                "entropy_penalty_coef": ARGS.entropy_penalty}
+
     seeds = [int(s) for s in ARGS.seeds.split(",") if s.strip()]
     total_steps = ARGS.steps if ARGS.steps is not None else prof["steps"]
     stop_iters = ARGS.iters if ARGS.iters is not None else prof["iters"]
@@ -335,6 +345,7 @@ def main():
                 "action_type": prof["action_type"], "seeds": seeds,
                 "steps": total_steps, "iters": stop_iters, "run_name": run_name,
                 "hp": {k: v for k, v in tune_hp.items()},
+                "entropy_penalty": ARGS.entropy_penalty,
                 "cap": train_cfg.env.max_time_steps,
                 "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
     print("[unified-config] " + json.dumps(resolved, sort_keys=True), flush=True)

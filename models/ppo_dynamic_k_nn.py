@@ -69,6 +69,13 @@ class DynamicKNNPPORLlib(NeighborSelectionPPORLlib):
             name=name,
             **kwargs,
         )
+        # Opt-in entropy penalty (B8-1 probe): RLlib's PPO validate_config
+        # rejects entropy_coeff < 0, so determinism pressure on the pointer
+        # categorical must enter through custom_loss instead.
+        mc = (model_config or {}).get("custom_model_config", {})
+        self.entropy_penalty_coef = float(mc.get("entropy_penalty_coef", 0.0))
+        self._pointer_logits = None
+        self._last_entropy_penalty = None
 
     def forward(
         self,
@@ -84,6 +91,7 @@ class DynamicKNNPPORLlib(NeighborSelectionPPORLlib):
         logits = self.attention_scores_to_logits(
             pointer_scores, obs_dict["padding_mask"]
         )
+        self._pointer_logits = logits
 
         # NeighborSelectorTorch zeros padded ego contexts before taking this
         # mean, so the critic representation contains active egos only.
@@ -93,6 +101,27 @@ class DynamicKNNPPORLlib(NeighborSelectionPPORLlib):
             self.values = self.critic(obs_dict)[1].squeeze(1)
 
         return logits, state
+
+    def custom_loss(self, policy_loss, loss_inputs):
+        """Inherited aux terms no-op (forced off); optionally add an entropy
+        penalty on the pointer categoricals cached by the last forward pass.
+
+        The penalty sums per-ego categorical entropies (matching the scale of
+        RLlib's reported joint-distribution entropy) and is added with a
+        positive coefficient, i.e. loss goes down as the policy commits.
+        """
+        policy_loss = super().custom_loss(policy_loss, loss_inputs)
+        coef = self.entropy_penalty_coef
+        if coef > 0 and self._pointer_logits is not None \
+                and isinstance(policy_loss[0], torch.Tensor):
+            flat = self._pointer_logits
+            b = flat.shape[0]
+            n = int(round(flat.shape[1] ** 0.5))
+            logp = F.log_softmax(flat.reshape(b, n, n), dim=-1)
+            ent = -(logp.exp() * logp).sum(-1).sum(-1)  # (B,): sum over egos
+            self._last_entropy_penalty = ent.mean().detach()
+            policy_loss = [policy_loss[0] + coef * ent.mean()] + list(policy_loss[1:])
+        return policy_loss
 
     def attention_scores_to_logits(
         self,
