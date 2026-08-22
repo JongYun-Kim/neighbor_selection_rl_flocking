@@ -63,14 +63,32 @@ Many studies/figures scripts hardcode `/workspace/...` paths — keep the repo a
 | `docs/` | baseline catalog + guide for adding a heuristic |
 | `legacy/` | dormant Jan–May 2026 experiment scripts + frozen era log (`legacy/HANDOFF.md`) |
 
-Root trainers: `train.py` (documented baseline entry point for the binary-edge
-line; not the winning recipe), `train_c2_a.py` / `train_c2_b.py` (C2 arms A/B),
-`train_robust.py` (→ π_R), `train_robust2.py` (weights-only fine-tune, → π_E),
-`train_hardtopk.py` (Phase-14 ancestor of the C2 line),
-`train_dynamic_knn.py` (dynamic-k original trainer, env-var configured — the
-6M-step fixed-length recipe validated on an i9-9900KF + RTX 3090: 8 workers × 2
-envs, batch 8192, lr `2e-5`→`1e-7`; every value overridable via the environment
-variables listed by `./docker/run_train.sh --help`).
+**Primary entry point — `train_unified.py`** (integration line): one trainer for
+both methods under the shared C2 regime, selected by `--profile`:
+
+- `policy_robust` — binary edge selection, the confirmed π_R recipe of
+  `train_robust.py --variant legacy` verbatim (aux 0.3/0.05, bernoulli head).
+- `dknn_c2` — dynamic-k pointer under the same C2 regime (c2_shaping reward, C2
+  early termination, cap 2000, N=20, L-mix); D2 probe axes exposed as flags
+  (`--lr/--lr-end/--grad-clip/--entropy-coeff/--minibatch/...`).
+- `dknn_legacy` — the dknn original fixed-1000-step regime, preserved but not
+  part of the integration study (requires `--allow-legacy`).
+
+`--seeds a,b,c` makes one Tune trial per seed (worker envs derive
+`seed + 10007*worker_index + 101*vector_index`); `--gpu` sets
+`CUDA_VISIBLE_DEVICES` (unset = leave visibility untouched); W&B is off unless
+`WANDB_ENABLED=1`. Example: `python train_unified.py --profile dknn_c2 --gpu 1
+--steps 500000`.
+
+Single-method trainers (all preserved unchanged): `train.py` (documented
+baseline entry point for the binary-edge line; not the winning recipe),
+`train_c2_a.py` / `train_c2_b.py` (C2 arms A/B), `train_robust.py` (→ π_R),
+`train_robust2.py` (weights-only fine-tune, → π_E), `train_hardtopk.py`
+(Phase-14 ancestor of the C2 line), `train_dynamic_knn.py` (dynamic-k original
+trainer, env-var configured — the 6M-step fixed-length recipe validated on an
+i9-9900KF + RTX 3090: 8 workers × 2 envs, batch 8192, lr `2e-5`→`1e-7`; every
+value overridable via the environment variables listed by
+`./docker/run_train.sh --help`).
 
 ## Evaluating / extending
 
@@ -109,7 +127,9 @@ Start a named run in a detached container:
 ./docker/run_train.sh status | logs | stop
 ```
 
-The service entry point is selectable via `TRAIN_ENTRY` (see
+The service entry point is selectable via `TRAIN_ENTRY` (default
+`train_unified.py`, profile via `FLOCK_PROFILE`; set
+`TRAIN_ENTRY=train_dynamic_knn.py` for the original dynamic-k recipe — see
 `docker/train_service.sh`). Results land under `test_results/<run-id>/` on the
 host. The container uses `restart=unless-stopped` and Ray Tune uses
 `AUTO+ERRORED`, so an unexpected process/container/host restart resumes from the

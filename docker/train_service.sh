@@ -5,8 +5,9 @@ training_results_dir="${TRAINING_RESULTS_DIR:-/workspace/test_results}"
 workflow_run_id="${WORKFLOW_RUN_ID:-dynamic-k-nn}"
 # Selectable trainer entry point. The historical hardcoded entry was train.py,
 # which on the integrated branch is the binary-edge baseline trainer; the
-# dynamic-k recipe this service was built around now lives in train_dynamic_knn.py.
-train_entry="${TRAIN_ENTRY:-train_dynamic_knn.py}"
+# original dynamic-k recipe lives in train_dynamic_knn.py, and the default is
+# the unified dual-method trainer (profile via FLOCK_PROFILE, default dknn_c2).
+train_entry="${TRAIN_ENTRY:-train_unified.py}"
 completion_marker="${training_results_dir}/.training_complete"
 
 mkdir -p "${training_results_dir}"
