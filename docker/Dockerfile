@@ -31,7 +31,9 @@ RUN add-apt-repository ppa:deadsnakes/ppa -y \
  && rm -rf /var/lib/apt/lists/*
 
 # fix python
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
+# The generic bootstrap URL now targets Python >=3.10.  This image deliberately
+# stays on Python 3.9 for the Ray 2.1 checkpoint/training stack.
+RUN curl -sS https://bootstrap.pypa.io/pip/3.9/get-pip.py -o /tmp/get-pip.py \
  && /usr/bin/python3.9 /tmp/get-pip.py \
  && rm -f /tmp/get-pip.py \
  # enable python and python3 in cli
@@ -117,6 +119,7 @@ tzdata==2024.1
 urllib3==2.2.1
 virtualenv==20.26.2
 Werkzeug==3.0.3
+wandb==0.22.3
 zipp==3.19.0
 REQ
 RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt

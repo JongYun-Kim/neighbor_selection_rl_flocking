@@ -11,6 +11,7 @@ from ray.rllib.utils.typing import (
     MultiAgentDict,
 )
 from ray.tune.logger import pretty_print
+from dynamic_k_nn.identifiers import ACTION_TYPE
 from utils.utils import (wrap_to_pi, wrap_to_rectangle,
                               get_rel_pos_dist_in_periodic_boundary, map_periodic_to_continuous_space)
 from typing import List, Optional
@@ -112,6 +113,10 @@ class EnvConfig(BaseModel):
     #             (r0-anchored; far field log-compressed; range ~ legacy's).
     initial_position_bound_pool: Optional[List[float]] = None
     obs_position_scale: str = "legacy"    # "legacy" | "r0_log"
+    # Evaluation-only diagnostics.  Copying the converted action and controls
+    # into ``info`` is intentionally opt-in so rollout workers do not pay the
+    # allocation cost during training.
+    evaluation_diagnostics: bool = False
 
 
 class Config(BaseModel):
@@ -226,9 +231,16 @@ class NeighborSelectionFlockingEnv(gym.Env):
                 self.action_dtype = np.int8
                 self.action_space = Box(low=0, high=1,
                                         shape=(self.num_agents_max, self.num_agents_max), dtype=self.action_dtype)
+            elif self.config.env.action_type == ACTION_TYPE:
+                self.action_dtype = np.int64
+                self.action_space = MultiDiscrete(
+                    np.full(self.num_agents_max, self.num_agents_max, dtype=np.int64)
+                )
             else:
-                raise NotImplementedError("action_type must be binary_vector. "
-                                          "The radius and continuous_vector are still in alpha, sorry.")
+                raise NotImplementedError(
+                    "single_env action_type must be binary_vector or dynamic_k_nn. "
+                    "The radius and continuous_vector are still in alpha, sorry."
+                )
         elif self.config.env.env_mode == "multi_env":
             print("WARNING (env.__init__): multi_env is experimental; not fully implemented yet")
             if self.config.env.action_type == "binary_vector":
@@ -333,6 +345,16 @@ class NeighborSelectionFlockingEnv(gym.Env):
         # Set num_agents_min and num_agents_max
         self.num_agents_min = self.num_agents_pool_np.min()
         self.num_agents_max = self.num_agents_pool_np.max()
+
+        if self.config.env.action_type == ACTION_TYPE:
+            if self.config.env.env_mode != "single_env":
+                raise ValueError("dynamic_k_nn is supported only in single_env mode")
+            if self.config.env.comm_range is not None:
+                raise ValueError("dynamic_k_nn requires comm_range=None (all-to-all communication)")
+            # continuous_action would silently take over the action space (the
+            # continuous branch wins every dispatch) and starve the pointer path.
+            assert not self.config.env.continuous_action, \
+                "continuous_action=True is incompatible with action_type='dynamic_k_nn'"
 
         # # max_time_step: must be an int and > 0
         # assert isinstance(self.max_time_steps, int), "max_time_step must be an int"
@@ -463,9 +485,11 @@ class NeighborSelectionFlockingEnv(gym.Env):
         padding_mask = np.zeros(num_agents_max, dtype=np.bool_)  # (num_agents_max, )
         padding_mask[:num_agents] = True
         # # neighbor_masks
+        if self.config.env.action_type == ACTION_TYPE and comm_range is not None:
+            raise ValueError("dynamic_k_nn requires comm_range=None (all-to-all communication)")
         self.config.env.comm_range = comm_range
         if self.config.env.comm_range is None:
-            neighbor_masks = np.ones((num_agents_max, num_agents_max), dtype=np.bool_)
+            neighbor_masks = self._make_all_to_all_neighbor_masks(padding_mask)
         else:
             neighbor_masks = self.compute_neighbor_agents(
                 agent_states=agent_states, padding_mask=padding_mask, communication_range=self.config.env.comm_range)[0]
@@ -489,6 +513,10 @@ class NeighborSelectionFlockingEnv(gym.Env):
         return obs
 
     def reset(self):
+        if (self.config.env.action_type == ACTION_TYPE
+                and self.config.env.comm_range is not None):
+            raise ValueError("dynamic_k_nn requires comm_range=None (all-to-all communication)")
+
         # Init time steps
         self.time_step = 0
         # self.agent_time_step = np.zeros(self.num_agents_max, dtype=np.int32)
@@ -513,7 +541,7 @@ class NeighborSelectionFlockingEnv(gym.Env):
         # # Concatenate p v th
         agent_states = np.concatenate([p, v, th[:, np.newaxis]], axis=1)  # (num_agents_max, 5)
         if self.config.env.comm_range is None:
-            neighbor_masks = np.ones((self.num_agents_max, self.num_agents_max), dtype=np.bool_)
+            neighbor_masks = self._make_all_to_all_neighbor_masks(padding_mask)
         else:
             neighbor_masks = self.compute_neighbor_agents(
                 agent_states=agent_states, padding_mask=padding_mask, communication_range=self.config.env.comm_range)[0]
@@ -554,6 +582,10 @@ class NeighborSelectionFlockingEnv(gym.Env):
         :param action: your_model_output; ndarray of shape (num_agents_max, num_agents_max) expected under the default
         :return: obs, reward, done, info
         """
+        if (self.config.env.action_type == ACTION_TYPE
+                and self.config.env.comm_range is not None):
+            raise ValueError("dynamic_k_nn requires comm_range=None (all-to-all communication)")
+
         state = self.state  # state of the class (flock);
         rel_state = self.rel_state  # did NOT consider the communication network, DELIBERATELY
 
@@ -600,6 +632,9 @@ class NeighborSelectionFlockingEnv(gym.Env):
             "conn_ratio": getattr(self, '_conn_ratio', None),
             "per_agent_rewards": rewards.copy(),
         }
+        if self.config.env.evaluation_diagnostics:
+            info["binary_action"] = joint_action.copy()
+            info["control_inputs"] = control_inputs.copy()
         info = self.get_extra_info(info, next_state, next_rel_state, control_inputs, rewards, done)
         if self.config.env.get_state_hist:
             self.agent_states_hist[self.time_step] = next_state["agent_states"]
@@ -665,7 +700,17 @@ class NeighborSelectionFlockingEnv(gym.Env):
         :param model_output
         :return: interpreted_action
         """
-        return model_output
+        if self.config.env.action_type != ACTION_TYPE:
+            return model_output
+
+        cutoff_indices = np.asarray(model_output)
+        assert cutoff_indices.shape == (self.num_agents_max,), \
+            f"dynamic_k_nn action must have shape ({self.num_agents_max},)"
+        assert np.issubdtype(cutoff_indices.dtype, np.integer), \
+            "dynamic_k_nn action must have an integer dtype"
+        assert np.all((0 <= cutoff_indices) & (cutoff_indices < self.num_agents_max)), \
+            f"dynamic_k_nn entries must be in [0, {self.num_agents_max})"
+        return cutoff_indices.astype(self.action_dtype, copy=False)
 
     def validate_action(self, action, neighbor_masks, padding_mask):
         """
@@ -685,13 +730,34 @@ class NeighborSelectionFlockingEnv(gym.Env):
             np.clip(action, 0.2, 1.0, out=action)
             np.fill_diagonal(action, 1.0)
             action[~valid] = 0.0
-        else:
+            return
+
+        if self.config.env.action_type == "binary_vector":
             assert np.issubdtype(action.dtype, np.integer), "action must be a numpy integer type"
+            # Preserve the legacy binary-vector convention, including padding self-loops.
             if not np.all(np.diag(action) == 1):
                 np.fill_diagonal(action, 1)
                 print("WARNING (env.validate_action): diag(action) not all 1; Self-loops fixed in 'action'.")
             assert np.all((neighbor_masks | ~action)), "action[i, j] == 1 must not found if neighbor_mask[i, j] == 0"
             assert np.all((padding_mask[:, None] | ~action)), "action[i, j] == 1 must not found if padding_mask[j] == 0"
+            return
+
+        if self.config.env.action_type == ACTION_TYPE:
+            assert np.issubdtype(action.dtype, np.integer), \
+                "converted dynamic_k_nn action must have an integer dtype"
+
+            active_pairs = padding_mask[:, None] & padding_mask[None, :]
+            assert not np.any(action.astype(bool) & ~active_pairs), \
+                "dynamic_k_nn action must exclude padding agents"
+            assert np.all(np.diag(action)[padding_mask] == 1), \
+                "dynamic_k_nn action must include active self-loops"
+            assert np.all(np.diag(action)[~padding_mask] == 0), \
+                "dynamic_k_nn action must exclude padding self-loops"
+            assert np.all((neighbor_masks | ~action.astype(bool))), \
+                "dynamic_k_nn action must respect the all-to-all active-agent mask"
+            return
+
+        raise NotImplementedError(f"Unsupported action_type: {self.config.env.action_type}")
 
     def get_vicsek_action(self):
         neighbor_masks = self.state["neighbor_masks"]  # shape (num_agents_max, num_agents_max)
@@ -708,6 +774,8 @@ class NeighborSelectionFlockingEnv(gym.Env):
     def to_binary_action(self, action_in_another_type):
         if self.config.env.action_type == "binary_vector":
             return action_in_another_type
+        elif self.config.env.action_type == ACTION_TYPE:
+            return self.cutoff_indices_to_binary_action(action_in_another_type)
         elif self.config.env.action_type == "radius":
             # action_in_another_type: ndarray of shape (num_agents_max, )
             # # action_in_another_type[i] is the radius of the communication range of agent i
@@ -728,6 +796,43 @@ class NeighborSelectionFlockingEnv(gym.Env):
         elif self.config.env.action_type == "continuous_vector":
             raise NotImplementedError("continuous_vector action_type is not implemented yet")
         return None
+
+    def cutoff_indices_to_binary_action(self, cutoff_indices):
+        """Convert cutoff-agent indices into a directed Dynamic-k NN mask.
+
+        Selecting ego ``i`` itself gives it no external neighbors. Selecting an
+        active agent ``j`` includes every active ``k`` whose distance from ``i``
+        is no greater than ``distance(i, j)``. Equal-distance candidates are
+        therefore included. A padding selection, which can occur only from an
+        unmasked external caller or an action-space sample, safely falls back to
+        the ego/self choice.
+        """
+        cutoff_indices = self.interpret_action(cutoff_indices)
+        padding_mask = self.state["padding_mask"]
+        distances = self.rel_state["rel_agent_dists"]
+        binary_action = np.zeros(
+            (self.num_agents_max, self.num_agents_max), dtype=np.int8
+        )
+
+        active_indices = np.flatnonzero(padding_mask)
+        for ego in active_indices:
+            selected = int(cutoff_indices[ego])
+            if selected == ego or not padding_mask[selected]:
+                binary_action[ego, ego] = 1
+                continue
+
+            threshold = distances[ego, selected]
+            binary_action[ego] = (
+                padding_mask & np.less_equal(distances[ego], threshold)
+            ).astype(np.int8)
+
+        return binary_action
+
+    def _make_all_to_all_neighbor_masks(self, padding_mask):
+        """Return the all-to-all topology appropriate for the configured action."""
+        if self.config.env.action_type == ACTION_TYPE:
+            return padding_mask[:, None] & padding_mask[None, :]
+        return np.ones((self.num_agents_max, self.num_agents_max), dtype=np.bool_)
 
     def multi_to_single(self, variable_in_multi: MultiAgentDict):
         """

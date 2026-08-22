@@ -1,11 +1,15 @@
 #!/bin/bash
-set -e
+set -Eeuo pipefail
 
-# sshd 런타임 디렉토리 보장
-[ -d /var/run/sshd ] || mkdir -p /var/run/sshd
-
-echo "[entrypoint] starting sshd..."
-/usr/sbin/sshd
+if [ "${START_SSHD:-1}" = "1" ]; then
+    # Keep the legacy interactive/SSH workflow available. Host-driven training
+    # disables this daemon because the training process is the container job.
+    [ -d /var/run/sshd ] || mkdir -p /var/run/sshd
+    echo "[entrypoint] starting sshd..."
+    /usr/sbin/sshd
+else
+    echo "[entrypoint] sshd disabled"
+fi
 
 # Just to check versions and stuffs at the entry
 run_checks_and_shell() {
@@ -53,5 +57,8 @@ elif [ $# -eq 1 ] && [ "$1" = "bash" ]; then
 else
     # any other command → run as flocking
     echo "[entrypoint] executing as 'flocking': $*"
-    exec sudo -H -u flocking -- "$@"
+    # Preserve explicit Docker workflow metadata and runtime controls across
+    # the root -> flocking user transition. Secrets are file-mounted rather
+    # than placed in this environment.
+    exec sudo -H -E -u flocking -- "$@"
 fi
