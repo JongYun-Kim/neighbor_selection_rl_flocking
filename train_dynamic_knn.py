@@ -17,6 +17,7 @@ from dynamic_k_nn.identifiers import (
     WANDB_PROJECT as DEFAULT_WANDB_PROJECT,
 )
 from envs.env import NeighborSelectionFlockingEnv, Config, load_config
+from utils.paths import repo_path
 from models.ppo import NeighborSelectionPPORLlib
 from models.ppo_dynamic_k_nn import DynamicKNNPPORLlib
 
@@ -84,7 +85,7 @@ WANDB_API_KEY_FILE = Path(
     os.environ.get("WANDB_API_KEY_FILE", "/run/secrets/wandb_api_key")
 )
 TRAINING_RESULTS_DIR = os.environ.get(
-    "TRAINING_RESULTS_DIR", "/workspace/test_results"
+    "TRAINING_RESULTS_DIR", repo_path("test_results")
 )
 TUNE_EXPERIMENT_NAME = os.environ.get("TUNE_EXPERIMENT_NAME", EXPERIMENT_NAME)
 
@@ -136,7 +137,7 @@ if __name__ == "__main__":
         ray.init(local_mode=True)
 
     # Set up environment configuration
-    default_config_path = "./envs/default_env_config.yaml"
+    default_config_path = repo_path("envs", "default_env_config.yaml")
     my_config = load_config(default_config_path)
 
     # environment configs

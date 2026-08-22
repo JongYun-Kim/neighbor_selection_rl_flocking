@@ -27,10 +27,14 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 
 import numpy as np
 
-STUDY = "/workspace/studies/acs-confirm"
-PRED = "/workspace/studies/acs-conv-knn"
+# Repo root: FLOCK_ROOT when set, else resolved from this file's location
+# (studies/acs-confirm/src/... -> 4 levels up); /workspace in the canonical layout.
+REPO = os.environ.get("FLOCK_ROOT") or os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+STUDY = os.path.join(REPO, "studies", "acs-confirm")
+PRED = os.path.join(REPO, "studies", "acs-conv-knn")
 sys.path.insert(0, os.path.join(PRED, "src"))
-sys.path.insert(0, "/workspace")
+sys.path.insert(0, REPO)
 
 PHI_GOAL, W_A, W, EPS = 0.98, 50, 300, 0.05
 

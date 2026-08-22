@@ -26,12 +26,16 @@ _ap.add_argument("--resume", action="store_true",
 ARGS = _ap.parse_args()
 
 VARIANT = ARGS.variant
+# Historical per-variant GPU pin, overridable: pre-set CUDA_VISIBLE_DEVICES
+# wins, then FLOCK_GPU, then the legacy default below.
 GPU = {"legacy": "1", "r0log": "3"}[VARIANT]
 RUN_NAME = {"legacy": "c2R1_lmix_legacy_260807",
             "r0log": "c2R2_lmix_r0log_260807"}[VARIANT]
 
-os.environ["CUDA_VISIBLE_DEVICES"] = GPU
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", os.environ.get("FLOCK_GPU", GPU))
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+from utils.paths import repo_path  # noqa: E402
 
 import ray  # noqa: E402
 from ray import tune  # noqa: E402
@@ -52,7 +56,7 @@ L_POOL = [125.0, 250.0, 500.0]
 
 def build_env_config(is_training: bool) -> dict:
     # Absolute path: background launches must not depend on the shell cwd.
-    my_config = load_config("/workspace/envs/default_env_config.yaml")
+    my_config = load_config(repo_path("envs", "default_env_config.yaml"))
 
     # environment configs (A-line C2 block; see acs-c2-train PLAN Phase 3)
     my_config.env.action_type = "binary_vector"
@@ -238,7 +242,7 @@ def main():
     tune.run(
         GradLoggingPPO,
         name=RUN_NAME,
-        local_dir="/workspace/test_results",
+        local_dir=repo_path("test_results"),
         checkpoint_freq=10,
         checkpoint_at_end=True,
         stop={"training_iteration": 120},

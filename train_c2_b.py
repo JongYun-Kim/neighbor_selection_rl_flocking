@@ -16,8 +16,10 @@ import os
 
 # Pin to GPU 3 for this experiment (variant A uses GPU 1). Must be set BEFORE
 # importing ray/torch. Keep worker CPU threads at 1.
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", os.environ.get("FLOCK_GPU", "3"))
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+from utils.paths import repo_path
 
 import ray
 from ray import tune
@@ -37,7 +39,7 @@ EVAL_SEED = 900000
 
 
 def build_env_config(is_training: bool) -> dict:
-    my_config = load_config("./envs/default_env_config.yaml")
+    my_config = load_config(repo_path("envs", "default_env_config.yaml"))
 
     # environment configs (shared A/B; see PLAN Phase 3)
     my_config.env.action_type = "binary_vector"
@@ -244,7 +246,7 @@ def main():
     tune.run(
         GradLoggingPPO,
         name=RUN_NAME,
-        local_dir="/workspace/test_results",
+        local_dir=repo_path("test_results"),
         checkpoint_freq=10,
         checkpoint_at_end=True,
         stop={"training_iteration": 100},

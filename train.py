@@ -10,6 +10,7 @@ from models.ppo import NeighborSelectionPPORLlib
 from models.beta_dist import TorchContinuousWeightDist
 from callbacks import FlockingCallbacks
 from grad_logging_ppo import GradLoggingPPO
+from utils.paths import repo_path
 
 if __name__ == "__main__":
 
@@ -20,7 +21,7 @@ if __name__ == "__main__":
         ray.init(local_mode=True)
 
     # Set up environment configuration
-    default_config_path = "./envs/default_env_config.yaml"
+    default_config_path = repo_path("envs", "default_env_config.yaml")
     my_config = load_config(default_config_path)
 
     # environment configs
@@ -111,7 +112,7 @@ if __name__ == "__main__":
     tune.run(
         GradLoggingPPO,
         name="continuous_sf10_wctrl01_260527",
-        local_dir="/workspace/test_results",
+        local_dir=repo_path("test_results"),
         checkpoint_freq=10,
         keep_checkpoints_num=3,
         checkpoint_at_end=True,

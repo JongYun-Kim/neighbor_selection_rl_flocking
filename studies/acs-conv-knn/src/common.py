@@ -23,7 +23,11 @@ import sys
 
 import numpy as np
 
-REPO = "/workspace"
+# Repo root: FLOCK_ROOT when set, else resolved from this file's location
+# (studies/acs-conv-knn/src/common.py -> 4 levels up). Both equal /workspace
+# in the canonical deployment.
+REPO = os.environ.get("FLOCK_ROOT") or os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
