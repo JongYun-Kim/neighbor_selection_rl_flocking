@@ -12,6 +12,30 @@ from the machine that has `test_results/`, or reproduce with the commands below.
 | **π_R** | `c2R1_lmix_legacy_260807/GradLoggingPPO_…_cc4e6_…/checkpoint_000110` | Reliability/insurance policy (R1): scratch L-mix training, legacy obs. Failures 1/1000 vs k12 85/1000 (S1); insurance confirmed on every axis in acs-confirm (L 2/1500, N 1/1000). |
 | **A it40** | `c2A_bernoulli_260806/GradLoggingPPO_…_d5510_…/checkpoint_000040` | L=250 specialist (variant A, bernoulli head) at iter 40 — the fine-tune init that produced π_E. Kept for lineage/reproduction. |
 
+## Legacy Dynamic-k NN checkpoints (pre-rename, added 2026-08-27)
+
+`legacy_distance_pointer_260818/PPO_neighbor_selection_flocking_env_8d07b_00000_0_2026-08-18_06-10-46/`
+holds `checkpoint_{000848,000856,000952,000960,000968,000977}` plus the run's original
+`params.json`/`params.pkl`, copied verbatim (md5-verified) from the
+`neighbor_selection_rl_flocking_legacy_checkpoint` clone
+(`test_results/distance_pointer_neighbor_selection/`). That clone and the
+`dynamic_k_nn` branch clone are siblings off commit `b23c3aa`, sharing 89 of 92
+commits; `models/ppo_dynamic_k_nn.py` and `models/modules/*` are byte-identical
+between them, so these weights load into the current model with
+`strict=True` (100/100 keys) and forward outputs match bitwise.
+
+The run predates the Dynamic-k NN rename, so its `params.json` records
+`custom_model: distance_pointer_neighbor_selector_rl` and
+`action_type: distance_pointer`. It is kept unedited — `eval_c2_r3.py` maps both
+spellings (commit `500b8b4`). Training: 977 iterations / 8.0M steps, lr 2e-5,
+batch 8192, minibatch 256, sgd_iter 10, N=20, L=250 fixed, legacy reward, **no
+entropy penalty**; pointer entropy decays 59.66 -> 15.41 over the run.
+
+Measured under the acs-confirm criterion of record (seeds 1500-1999, n=500,
+argmax, 6000 steps): ck848 = 100% success, t_conv 532, J 152.6, CVaR10 201.0 —
+the best of every arm measured at L250/N20. Full comparison and the robustness
+matrix: `/workspace/LEGACY848_REPORT.md`.
+
 ## Reproduction (repo root, pinned stack, GPU)
 
 - A / it40: `python train_c2_a.py` — NOTE: its `RUN_NAME` constant currently points at
