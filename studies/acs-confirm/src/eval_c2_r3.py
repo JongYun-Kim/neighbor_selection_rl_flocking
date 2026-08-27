@@ -38,6 +38,22 @@ sys.path.insert(0, REPO)
 
 PHI_GOAL, W_A, W, EPS = 0.98, 50, 300, 0.05
 
+# Cutoff-pointer (Dynamic-k NN) identifiers, including the pre-rename
+# "distance_pointer" names written by runs that predate the Dynamic-k NN
+# refactor. The pointer -> mask rule (env.cutoff_indices_to_binary_action) is
+# unchanged across that rename, so those checkpoints take the same code path.
+DKNN_MODEL_NAMES = ("dynamic_k_nn_neighbor_selector_rl",
+                    "distance_pointer_neighbor_selector_rl")
+DKNN_ACTION_TYPES = ("dynamic_k_nn", "distance_pointer")
+
+
+def is_dknn_params(params):
+    """True if a run's params.json describes a cutoff-pointer policy."""
+    custom_model = params.get("model", {}).get("custom_model", "")
+    action_type = (params.get("env_config", {}).get("config", {})
+                   .get("env", {}).get("action_type", "binary_vector"))
+    return custom_model in DKNN_MODEL_NAMES or action_type in DKNN_ACTION_TYPES
+
 
 # ---------------------------------------------------------------- policy load
 class C2Policy:
@@ -110,9 +126,12 @@ class DknnC2Policy:
             state = pickle.load(f)
         torch_state = {k: torch.from_numpy(v) if isinstance(v, np.ndarray) else v
                        for k, v in state["weights"].items()}
-        missing, unexpected = self.model.load_state_dict(torch_state, strict=False)
-        if missing or unexpected:
-            print(f"WARN load_state_dict: missing={missing} unexpected={unexpected}")
+        # strict=True on purpose: the pointer model and the binary-vector model
+        # share an identical parameter set, so a mis-dispatched checkpoint would
+        # load silently under strict=False and then have its N*N pointer logits
+        # reinterpreted as N*N*2 binary logits. Only the head arity differs, and
+        # only this assertion sees it.
+        self.model.load_state_dict(torch_state, strict=True)
         self.model.eval()
         self.N = N
 
@@ -152,10 +171,7 @@ def load_policy(checkpoint_path, env):
     params_path = os.path.join(os.path.dirname(checkpoint_path), "params.json")
     with open(params_path) as f:
         params = json.load(f)
-    custom_model = params.get("model", {}).get("custom_model", "")
-    action_type = (params.get("env_config", {}).get("config", {})
-                   .get("env", {}).get("action_type", "binary_vector"))
-    if custom_model == "dynamic_k_nn_neighbor_selector_rl" or action_type == "dynamic_k_nn":
+    if is_dknn_params(params):
         mc = params["model"]["custom_model_config"]
         return DknnC2Policy(checkpoint_path, env, mc)
     return C2Policy(checkpoint_path, env)
@@ -254,9 +270,7 @@ def run_one(args):
     with open(os.path.join(os.path.dirname(ckpt), "params.json")) as f:
         _params = json.load(f)
     _penv = _params.get("env_config", {}).get("config", {}).get("env", {})
-    _is_dknn = (_params.get("model", {}).get("custom_model", "")
-                == "dynamic_k_nn_neighbor_selector_rl"
-                or _penv.get("action_type") == "dynamic_k_nn")
+    _is_dknn = is_dknn_params(_params)
     if _is_dknn:
         cfg.env.action_type = "dynamic_k_nn"
         # env-side realized-mask reporting: selection-graph series and any
