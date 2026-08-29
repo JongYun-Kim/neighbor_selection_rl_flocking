@@ -1,41 +1,50 @@
-"""Unified dual-method trainer (integration/dual-policy line).
+"""Unified trainer for the neighbor-selection methods (canonical entry point).
 
-One entry point trains either neighbor-selection method under the shared C2
-regime (INTEGRATION_PLAN Q2/Q4; profiles below), with the D6 seed scheme,
+One entry point trains any of the profiles below with the D6 seed scheme,
 deterministic in-training evaluation, C2Callbacks metrics, and W&B off by
 default (Q10: set WANDB_ENABLED=1 to opt in).
 
 Profiles
-  policy_robust  binary_vector + NeighborSelectionPPORLlib — the confirmed
-                 pi_R recipe of train_robust.py --variant legacy, verbatim
-                 (aux 0.3/0.05, bernoulli head, lr 5e-4->1e-4@800k,
-                 batch 16000, 120 iters ~= 1.92M steps).
-  dknn_c2        dynamic_k_nn + DynamicKNNPPORLlib under the SAME C2 regime
-                 (c2_shaping reward, C2 early termination, cap 2000, N=20,
-                 L-mix {125,250,500}). HP start from the dknn original recipe;
-                 the D2 probe axes are exposed as CLI flags.
-  dknn_legacy    the dknn original regime (fixed 1000-step episodes, legacy
-                 shaped reward, 6M-step schedule) — DEFINED BUT NOT RUN in the
-                 integration study (plan Q3/Q4 rider); requires --allow-legacy.
+  dknn     (default) cutoff-pointer Dynamic-k NN under the ORIGINAL recipe of
+           checkpoint ck848: fixed 1000-step episodes, legacy shaped reward,
+           minibatch 256 / 10 SGD iters / 8M-step budget, lr 2e-5 -> 1e-7
+           anchored at 8M. Field-for-field equivalent to that run's
+           params.json; tools/check_ck848_parity.py holds the allowed-diff
+           whitelist and is the regression gate. This is the main line.
+  pi_r     binary_vector + NeighborSelectionPPORLlib — the confirmed pi_R
+           recipe of train_robust.py --variant legacy, verbatim (aux
+           0.3/0.05, bernoulli head, lr 5e-4->1e-4@800k, batch 16000, 120
+           iters ~= 1.92M steps), under the C2 training regime.
+  dknn_c2  EXPERIMENTAL, not the canonical line: dynamic_k_nn under the SAME
+           C2 training regime as pi_r (c2_shaping reward, C2 early
+           termination, cap 2000, N=20, L-mix {125,250,500}). Kept as the
+           starting point for the later "8M budget x C2 regime" ablation; the
+           D2 probe axes stay exposed as CLI flags.
 
 Usage
-  python train_unified.py --profile policy_robust --gpu 1
-  python train_unified.py --profile dknn_c2 --gpu 1 --steps 500000
-  python train_unified.py --profile dknn_c2 --seeds 42,1042 --gpu 1,3
-  python train_unified.py --profile dknn_c2 --smoke        # short CPU smoke
+  python train_unified.py                                # dknn, 8M steps
+  python train_unified.py --profile pi_r --gpu 1
+  python train_unified.py --profile dknn --seeds 42,1042 --gpu 1,3
+  python train_unified.py --profile dknn --smoke         # short CPU smoke
+  python train_unified.py --profile dknn --dry-run       # resolved config, no run
+  python train_unified.py --profile dknn --dry-run | python tools/check_ck848_parity.py
 
-Seeds: --seeds a,b,c makes one Tune trial per seed (env seed_id grid; worker
-envs derive seed + 10007*worker_index + 101*vector_index, main-style D6).
-Existing single-method trainers (train_robust*.py, train_dynamic_knn.py, ...)
-are preserved unchanged.
+Seeds: --seeds a,b,c makes one Tune trial per seed (env seed_id grid, with the
+RLlib "seed" of each trial synchronized to it; worker envs derive
+seed + 10007*worker_index + 101*vector_index, main-style D6).
+
+Budget: reducing --steps does NOT move a profile's lr_schedule anchors — the
+ck848 schedule is anchored at 8M by definition of the recipe, and ck848 itself
+sits at 6.95M on that schedule. Pass --lr-end to re-anchor to --steps
+explicitly.
 """
 import argparse
 import json
 import os
 
 _ap = argparse.ArgumentParser()
-_ap.add_argument("--profile", default=os.environ.get("FLOCK_PROFILE", "dknn_c2"),
-                 choices=["policy_robust", "dknn_c2", "dknn_legacy"])
+_ap.add_argument("--profile", default=os.environ.get("FLOCK_PROFILE", "dknn"),
+                 choices=["dknn", "pi_r", "dknn_c2"])
 _ap.add_argument("--seeds", default=os.environ.get("FLOCK_SEEDS", "42"),
                  help="comma-separated training seeds; one Tune trial per seed")
 _ap.add_argument("--gpu", default=os.environ.get("FLOCK_GPU"),
@@ -44,13 +53,15 @@ _ap.add_argument("--gpu", default=os.environ.get("FLOCK_GPU"),
 _ap.add_argument("--steps", type=int, default=None,
                  help="stop at this many env steps (default: profile budget)")
 _ap.add_argument("--iters", type=int, default=None,
-                 help="ALSO stop at this training iteration (policy_robust "
-                      "default: 120, the recipe's grid)")
+                 help="ALSO stop at this training iteration (pi_r default: "
+                      "120, the recipe's grid)")
 _ap.add_argument("--run-name", default=None)
 _ap.add_argument("--smoke", action="store_true", help="short CPU smoke (2 iters)")
 _ap.add_argument("--resume", action="store_true")
-_ap.add_argument("--allow-legacy", action="store_true",
-                 help="required to actually run the dknn_legacy profile")
+_ap.add_argument("--dry-run", action="store_true",
+                 help="print the resolved RLlib config + stop condition as one "
+                      "JSON object on stdout and exit, before ray.init "
+                      "(feeds tools/check_ck848_parity.py)")
 # --- D2 probe axes (dknn_c2 tuning) + general knobs; None = profile default ---
 _ap.add_argument("--lr", type=float, default=None)
 _ap.add_argument("--lr-end", type=float, default=None,
@@ -68,6 +79,10 @@ _ap.add_argument("--envs-per-worker", type=int, default=None)
 _ap.add_argument("--fragment", type=int, default=None)
 _ap.add_argument("--cap", type=int, default=None, help="max_time_steps override")
 _ap.add_argument("--eval-interval", type=int, default=10)
+_ap.add_argument("--num-gpus", type=int, default=1,
+                 help="RLlib num_gpus for the learner (forced to 0 by --smoke). "
+                      "Set 0 on a CPU-only host: without it a trial requests a "
+                      "GPU and Tune leaves it PENDING forever instead of failing.")
 _ap.add_argument("--num-cpus", type=int, default=None,
                  help="ray.init num_cpus (default: workers + eval workers + 2)")
 _ap.add_argument("--object-store-gb", type=float, default=8.0)
@@ -101,7 +116,7 @@ L_POOL = [125.0, 250.0, 500.0]        # D4
 
 
 def build_env_config(is_training, action_type, regime):
-    """Shared env builder. regime: 'c2' (unified study) or 'legacy_dknn'."""
+    """Shared env builder. regime: 'c2' (unified study) or 'dknn_original'."""
     cfg = load_config(repo_path("envs", "default_env_config.yaml"))
     e = cfg.env
     e.action_type = action_type
@@ -135,7 +150,10 @@ def build_env_config(is_training, action_type, regime):
         e.obs_position_scale = "legacy"
         # Method-side exposure flags are set by the profile (aux/global_stats
         # are policy-method components, Q6).
-    elif regime == "legacy_dknn":
+    elif regime == "dknn_original":
+        # The ck848 recipe's training env: fixed-length episodes, legacy shaped
+        # reward, legacy termination. Every field below is what that run wrote
+        # to its params.json; the fields it predates keep their legacy defaults.
         e.use_fixed_episode_length = True
         e.max_time_steps = 1000
         e.termination_mode = "legacy"
@@ -198,7 +216,21 @@ DKNN_MODEL_CONFIG = {
 }
 
 PROFILES = {
-    "policy_robust": dict(
+    "dknn": dict(
+        method="dynamic_knn", action_type=ACTION_TYPE,
+        model_name=MODEL_ID, model_cls=DynamicKNNPPORLlib,
+        model_config=DKNN_MODEL_CONFIG, regime="dknn_original",
+        env_extra=dict(expose_aux_target=False, expose_global_stats=False),
+        steps=8_000_000, iters=None,
+        tune=dict(
+            num_workers=8, num_envs_per_worker=2, rollout_fragment_length=512,
+            train_batch_size=8192, sgd_minibatch_size=256, num_sgd_iter=10,
+            # ck848 anchors: the endpoint is 8M steps regardless of --steps.
+            lr=2e-5, lr_schedule=[[0, 2e-5], [8_000_000, 1e-7]],
+            clip_param=0.2, grad_clip=0.5, entropy_coeff=0.0,
+        ),
+    ),
+    "pi_r": dict(
         method="policy", action_type="binary_vector",
         model_name="neighbor_selector_rl", model_cls=NeighborSelectionPPORLlib,
         model_config=POLICY_MODEL_CONFIG, regime="c2",
@@ -225,29 +257,28 @@ PROFILES = {
             clip_param=0.2, grad_clip=0.5, entropy_coeff=0.0,
         ),
     ),
-    "dknn_legacy": dict(
-        method="dynamic_knn", action_type=ACTION_TYPE,
-        model_name=MODEL_ID, model_cls=DynamicKNNPPORLlib,
-        model_config=DKNN_MODEL_CONFIG, regime="legacy_dknn",
-        env_extra=dict(expose_aux_target=False, expose_global_stats=False),
-        steps=6_000_000, iters=None,
-        tune=dict(
-            num_workers=8, num_envs_per_worker=2, rollout_fragment_length=512,
-            train_batch_size=8192, sgd_minibatch_size=512, num_sgd_iter=7,
-            lr=2e-5, lr_schedule=[[0, 2e-5], [6_000_000, 1e-7]],
-            clip_param=0.2, grad_clip=0.5, entropy_coeff=0.0,
-        ),
-    ),
 }
+
+
+def dry_run_payload(config, stop, seeds, run_name):
+    """The resolved run, as one JSON-serializable object.
+
+    Tune placeholders (the seed grid axis and the sample_from that mirrors it)
+    are collapsed to the seed list, and the callbacks class to its import path,
+    so the result is diffable against a params.json written by a real run.
+    """
+    seed_axis = seeds[0] if len(seeds) == 1 else list(seeds)
+    cfg = dict(config)
+    cfg["callbacks"] = "{}.{}".format(config["callbacks"].__module__,
+                                      config["callbacks"].__name__)
+    cfg["env_config"] = {**config["env_config"], "seed_id": seed_axis}
+    cfg["seed"] = seed_axis
+    return {"profile": ARGS.profile, "run_name": run_name, "seeds": list(seeds),
+            "stop": stop, "config": cfg}
 
 
 def main():
     prof = PROFILES[ARGS.profile]
-    if ARGS.profile == "dknn_legacy" and not ARGS.allow_legacy:
-        raise SystemExit(
-            "dknn_legacy is defined for preservation only (plan Q3/Q4 rider); "
-            "pass --allow-legacy to actually run it.")
-
     if ARGS.entropy_penalty is not None:
         if prof["method"] != "dynamic_knn":
             raise SystemExit("--entropy-penalty is a dknn-only probe knob")
@@ -302,7 +333,7 @@ def main():
         "callbacks": C2Callbacks,
         "model": {"custom_model": prof["model_name"],
                   "custom_model_config": prof["model_config"]},
-        "num_gpus": 0 if ARGS.smoke else 1,
+        "num_gpus": 0 if ARGS.smoke else ARGS.num_gpus,
         "num_workers": tune_hp["num_workers"],
         "num_cpus_per_worker": 1,
         "num_envs_per_worker": tune_hp["num_envs_per_worker"],
@@ -334,12 +365,24 @@ def main():
     }
     if tune_hp.get("lr_schedule"):
         config["lr_schedule"] = tune_hp["lr_schedule"]
+    # RLlib's own seed (torch/numpy/python RNG of learner and workers). ck848
+    # set it; leaving it unset made every unified run non-reproducible. With a
+    # seed grid it must follow the trial's env seed rather than form a second
+    # grid axis, which would multiply the trials.
+    config["seed"] = (seeds[0] if len(seeds) == 1 else
+                      tune.sample_from(
+                          lambda spec: spec.config["env_config"]["seed_id"]))
 
     run_name = ARGS.run_name or "uni_{}_s{}".format(
         ARGS.profile, "-".join(str(s) for s in seeds))
     stop = {"timesteps_total": total_steps}
     if stop_iters is not None:
         stop["training_iteration"] = stop_iters
+
+    if ARGS.dry_run:
+        print(json.dumps(dry_run_payload(config, stop, seeds, run_name),
+                         indent=1, sort_keys=True))
+        return
 
     resolved = {"profile": ARGS.profile, "method": prof["method"],
                 "action_type": prof["action_type"], "seeds": seeds,
