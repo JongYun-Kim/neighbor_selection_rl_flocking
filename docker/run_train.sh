@@ -10,7 +10,9 @@ results_root="${RESULTS_ROOT:-${repo_root}/test_results}"
 wandb_key_file="${WANDB_API_KEY_FILE_HOST:-${HOME}/.config/wandb/api_key}"
 shm_size="${SHM_SIZE:-24g}"
 gpu_request="${GPU_REQUEST:-all}"
-wandb_enabled="${WANDB_ENABLED:-true}"
+# W&B is opt-in repo-wide (train_unified.py defaults it off); keep the same
+# default here so a fresh clone starts without a key file.
+wandb_enabled="${WANDB_ENABLED:-false}"
 
 usage() {
     cat <<'EOF'
@@ -26,8 +28,13 @@ Commands:
   stop
       Explicitly stop the container. Docker will not restart an explicit stop.
 
+Recipe (train_unified.py):
+  FLOCK_PROFILE (dknn | pi_r | dknn_c2; default dknn), FLOCK_SEEDS,
+  FLOCK_GPU, FLOCK_RESUME (default 1)
+
 Environment overrides:
-  IMAGE_NAME, CONTAINER_NAME, RESULTS_ROOT, WANDB_API_KEY_FILE_HOST,
+  IMAGE_NAME, CONTAINER_NAME, RESULTS_ROOT, WANDB_ENABLED (default false),
+  WANDB_API_KEY_FILE_HOST,
   SHM_SIZE, GPU_REQUEST, BASE_ENV_SEED, TRAINING_SWARM_SIZE,
   NUM_ROLLOUT_WORKERS, NUM_ENVS_PER_WORKER, ROLLOUT_FRAGMENT_LENGTH,
   TOTAL_TRAINING_TIMESTEPS, MAX_TRAINING_TIME_S, TRAIN_BATCH_SIZE,
@@ -184,7 +191,11 @@ start_training() {
         )
     fi
 
+    # train_unified.py reads its recipe from FLOCK_*; without these the
+    # container silently falls back to the dknn defaults whatever the caller
+    # asked for. The rest are the env-var knobs of the retired TRAIN_ENTRY.
     local override_names=(
+        FLOCK_PROFILE FLOCK_SEEDS FLOCK_GPU FLOCK_RESUME
         BASE_ENV_SEED TRAINING_SWARM_SIZE NUM_ROLLOUT_WORKERS
         NUM_ENVS_PER_WORKER ROLLOUT_FRAGMENT_LENGTH TOTAL_TRAINING_TIMESTEPS
         MAX_TRAINING_TIME_S TRAIN_BATCH_SIZE SGD_MINIBATCH_SIZE NUM_SGD_ITER
@@ -230,6 +241,9 @@ start_training() {
 
     docker "${docker_args[@]}"
     echo "[run] started container=${container_name} run_id=${run_id}"
+    echo "[run] entry=${TRAIN_ENTRY:-train_unified.py}" \
+         "profile=${FLOCK_PROFILE:-dknn} seeds=${FLOCK_SEEDS:-42}" \
+         "gpus=${gpu_request} wandb=${normalized_wandb}"
     echo "[run] status: ./docker/run_train.sh status"
     echo "[run] logs:   ./docker/run_train.sh logs"
 }

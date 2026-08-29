@@ -219,6 +219,13 @@ CONTAINER_NAME=pir-seed7 \
 ./docker/run_train.sh start --run-id pir-n20-seed7
 ```
 
+The recipe is selected by `FLOCK_PROFILE` / `FLOCK_SEEDS` / `FLOCK_GPU`, which
+`run_train.sh` forwards into the container; `start` echoes the resolved
+`profile=… seeds=… gpus=… wandb=…` line, so check it against what you asked for.
+**W&B is off by default here too** (same opt-in policy as `train_unified.py`);
+`WANDB_ENABLED=1` turns it on and then a mode-600 key file at
+`WANDB_API_KEY_FILE_HOST` is required or `start` refuses.
+
 Setting `TRAIN_ENTRY=legacy/train_dynamic_knn.py` runs the retired env-var-driven
 Dynamic-k trainer instead; note its defaults are the *accelerated* variant
 (minibatch 512 / 7 SGD iters / 6M steps), not the ck848 recipe. See
