@@ -1,7 +1,7 @@
 """Unified trainer for the neighbor-selection methods (canonical entry point).
 
 One entry point trains any of the profiles below with the D6 seed scheme,
-deterministic in-training evaluation, C2Callbacks metrics, and W&B off by
+C2-protocol in-training evaluation, C2Callbacks metrics, and W&B off by
 default (Q10: set WANDB_ENABLED=1 to opt in).
 
 Profiles
@@ -33,6 +33,18 @@ Seeds: --seeds a,b,c makes one Tune trial per seed (env seed_id grid, with the
 RLlib "seed" of each trial synchronized to it; worker envs derive
 seed + 10007*worker_index + 101*vector_index, main-style D6).
 
+Evaluation: every profile evaluates under the SAME C2 protocol regardless of
+the regime it trains under — c2 termination, cap 6000 (--eval-cap), argmax
+actions, L=250 fixed, on dedicated workers. It is a monitoring signal only;
+checkpoint selection is decided offline by the eval/ harness on the same
+criterion (python -m eval.eval_c2 --rank-runs <run_dir> screens a run).
+
+Checkpoints: every 8 iterations, all kept (848 = 8 x 106, so a reproduction run
+lands on the same grid ck848 was harvested from), plus one at the end.
+
+Durability: --resume (or FLOCK_RESUME=1) restores the same Tune trial after a
+process failure, container restart or host reboot.
+
 Budget: reducing --steps does NOT move a profile's lr_schedule anchors — the
 ck848 schedule is anchored at 8M by definition of the recipe, and ck848 itself
 sits at 6.95M on that schedule. Pass --lr-end to re-anchor to --steps
@@ -40,7 +52,15 @@ explicitly.
 """
 import argparse
 import json
+import multiprocessing as mp
 import os
+from pathlib import Path
+
+
+def _env_flag(name):
+    """Truthy environment flag: 1/true/yes/on (case-insensitive)."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
 
 _ap = argparse.ArgumentParser()
 _ap.add_argument("--profile", default=os.environ.get("FLOCK_PROFILE", "dknn"),
@@ -57,7 +77,9 @@ _ap.add_argument("--iters", type=int, default=None,
                       "120, the recipe's grid)")
 _ap.add_argument("--run-name", default=None)
 _ap.add_argument("--smoke", action="store_true", help="short CPU smoke (2 iters)")
-_ap.add_argument("--resume", action="store_true")
+_ap.add_argument("--resume", action="store_true", default=_env_flag("FLOCK_RESUME"),
+                 help="restore the same Tune trial after a failure or restart "
+                      "(AUTO+ERRORED). Also settable with FLOCK_RESUME=1.")
 _ap.add_argument("--dry-run", action="store_true",
                  help="print the resolved RLlib config + stop condition as one "
                       "JSON object on stdout and exit, before ray.init "
@@ -77,8 +99,14 @@ _ap.add_argument("--sgd-iter", type=int, default=None)
 _ap.add_argument("--workers", type=int, default=None)
 _ap.add_argument("--envs-per-worker", type=int, default=None)
 _ap.add_argument("--fragment", type=int, default=None)
-_ap.add_argument("--cap", type=int, default=None, help="max_time_steps override")
-_ap.add_argument("--eval-interval", type=int, default=10)
+_ap.add_argument("--cap", type=int, default=None,
+                 help="TRAINING env max_time_steps override (the eval env has "
+                      "its own --eval-cap)")
+_ap.add_argument("--eval-cap", type=int, default=6000,
+                 help="eval env max_time_steps; 6000 is the C2 protocol cap, "
+                      "lower it only for smoke tests and gates")
+_ap.add_argument("--eval-interval", type=int, default=16,
+                 help="iterations between eval rounds (0 = no in-training eval)")
 _ap.add_argument("--num-gpus", type=int, default=1,
                  help="RLlib num_gpus for the learner (forced to 0 by --smoke). "
                       "Set 0 on a CPU-only host: without it a trial requests a "
@@ -105,7 +133,8 @@ from ray.tune.registry import register_env  # noqa: E402
 from envs.env import NeighborSelectionFlockingEnv, load_config  # noqa: E402
 from models.ppo import NeighborSelectionPPORLlib  # noqa: E402
 from models.ppo_dynamic_k_nn import DynamicKNNPPORLlib  # noqa: E402
-from dynamic_k_nn.identifiers import ACTION_TYPE, MODEL_ID  # noqa: E402
+from dynamic_k_nn.identifiers import (  # noqa: E402
+    ACTION_TYPE, MODEL_ID, WANDB_PROJECT as DEFAULT_WANDB_PROJECT)
 from callbacks import C2Callbacks  # noqa: E402
 from grad_logging_ppo import GradLoggingPPO  # noqa: E402
 from utils.paths import repo_path  # noqa: E402
@@ -114,9 +143,20 @@ ENV_NAME = "neighbor_selection_flocking_env"
 EVAL_SEED = 900000                    # D6
 L_POOL = [125.0, 250.0, 500.0]        # D4
 
+# W&B is opt-in and off by default; the key file is required when it is on.
+WANDB_ENABLED = _env_flag("WANDB_ENABLED")
+WANDB_PROJECT = os.environ.get("WANDB_PROJECT", DEFAULT_WANDB_PROJECT)
+WANDB_API_KEY_FILE = Path(
+    os.environ.get("WANDB_API_KEY_FILE", "/run/secrets/wandb_api_key"))
+
 
 def build_env_config(is_training, action_type, regime):
-    """Shared env builder. regime: 'c2' (unified study) or 'dknn_original'."""
+    """Shared env builder.
+
+    regime: 'c2' (unified C2 training regime), 'dknn_original' (the ck848
+    training regime) or 'c2_eval' (the evaluation protocol, used by every
+    profile and never for training).
+    """
     cfg = load_config(repo_path("envs", "default_env_config.yaml"))
     e = cfg.env
     e.action_type = action_type
@@ -161,6 +201,21 @@ def build_env_config(is_training, action_type, regime):
         e.acs_train_w_ctrl = 0.02
         e.acs_train_w_pos = 1.0
         e.acs_train_w_vel = 0.2
+    elif regime == "c2_eval":
+        # The C2 protocol, identical to what eval/eval_c2.py judges offline, so
+        # an eval round and the criterion of record fire on the same event.
+        # Deliberately independent of the training regime: no L pool, no
+        # shaping, cap at the protocol's 6000 rather than the training cap.
+        e.use_fixed_episode_length = False
+        e.termination_mode = "c2"             # env fire == offline judge's step
+        e.reward_mode = "legacy"              # is_training=False -> control cost
+        e.max_time_steps = 6000               # C2 cap; --eval-cap overrides
+        e.c2_phi_goal = 0.98                  # pinned: protocol constants, not
+        e.c2_align_window = 50                # defaults to inherit
+        e.c2_window = 300
+        e.c2_eps = 0.05
+        e.initial_position_bound_pool = None  # L = 250 (control.initial_position_bound)
+        e.obs_position_scale = "legacy"
     else:
         raise ValueError(f"unknown regime: {regime}")
 
@@ -219,7 +274,7 @@ PROFILES = {
     "dknn": dict(
         method="dynamic_knn", action_type=ACTION_TYPE,
         model_name=MODEL_ID, model_cls=DynamicKNNPPORLlib,
-        model_config=DKNN_MODEL_CONFIG, regime="dknn_original",
+        model_config=DKNN_MODEL_CONFIG, regime="dknn_original", eval_regime="c2_eval",
         env_extra=dict(expose_aux_target=False, expose_global_stats=False),
         steps=8_000_000, iters=None,
         tune=dict(
@@ -233,7 +288,7 @@ PROFILES = {
     "pi_r": dict(
         method="policy", action_type="binary_vector",
         model_name="neighbor_selector_rl", model_cls=NeighborSelectionPPORLlib,
-        model_config=POLICY_MODEL_CONFIG, regime="c2",
+        model_config=POLICY_MODEL_CONFIG, regime="c2", eval_regime="c2_eval",
         env_extra=dict(expose_aux_target=True, expose_global_stats=True),
         steps=1_920_000, iters=120,
         tune=dict(
@@ -246,7 +301,7 @@ PROFILES = {
     "dknn_c2": dict(
         method="dynamic_knn", action_type=ACTION_TYPE,
         model_name=MODEL_ID, model_cls=DynamicKNNPPORLlib,
-        model_config=DKNN_MODEL_CONFIG, regime="c2",
+        model_config=DKNN_MODEL_CONFIG, regime="c2", eval_regime="c2_eval",
         env_extra=dict(expose_aux_target=False, expose_global_stats=False),
         steps=2_000_000, iters=None,
         tune=dict(
@@ -258,6 +313,35 @@ PROFILES = {
         ),
     ),
 }
+
+
+def wandb_callbacks(run_name):
+    """Opt-in W&B logging (WANDB_ENABLED=1), ported from train_dynamic_knn.py."""
+    if not WANDB_ENABLED:
+        return []
+    if not WANDB_API_KEY_FILE.is_file() or WANDB_API_KEY_FILE.stat().st_size == 0:
+        raise FileNotFoundError(
+            "WANDB_ENABLED is set but there is no non-empty W&B API key file at "
+            "{} (set WANDB_API_KEY_FILE)".format(WANDB_API_KEY_FILE))
+    # Ray 2.1's W&B callback subclasses multiprocessing.Process. With modern
+    # W&B's background service, forking the already multi-threaded Ray driver
+    # can segfault the logger process; spawn is portable and keeps the logger
+    # isolated while preserving the official callback's queue protocol.
+    mp.set_start_method("spawn", force=True)
+    from ray.air.callbacks.wandb import WandbLoggerCallback
+    return [WandbLoggerCallback(
+        project=WANDB_PROJECT,
+        group=os.environ.get("WORKFLOW_RUN_ID", "manual-unified"),
+        api_key_file=str(WANDB_API_KEY_FILE),
+        excludes=["hist_stats", "sampler_results/hist_stats",
+                  "evaluation/hist_stats", "media"],
+        log_config=False,
+        save_checkpoints=False,
+        name=os.environ.get("WANDB_RUN_NAME", run_name),
+        tags=[ARGS.profile, "ppo"],
+        job_type="training",
+        resume="allow",
+    )]
 
 
 def dry_run_payload(config, stop, seeds, run_name):
@@ -309,12 +393,20 @@ def main():
         tune_hp["lr_schedule"] = None  # explicit flat lr overrides profile schedule
 
     train_cfg = build_env_config(True, prof["action_type"], prof["regime"])
-    eval_cfg = build_env_config(False, prof["action_type"], prof["regime"])
+    eval_cfg = build_env_config(False, prof["action_type"], prof["eval_regime"])
     for cfg in (train_cfg, eval_cfg):
+        # Exposure flags are method components (Q6), so they follow the profile
+        # into the eval env even though the rest of it is protocol-fixed.
         for k, v in prof["env_extra"].items():
             setattr(cfg.env, k, v)
-        if ARGS.cap is not None:
-            cfg.env.max_time_steps = ARGS.cap
+    if ARGS.cap is not None:
+        train_cfg.env.max_time_steps = ARGS.cap
+    eval_cfg.env.max_time_steps = ARGS.eval_cap
+
+    # Eval is a monitoring signal, not the selection criterion, so --smoke and
+    # --eval-interval 0 switch it off entirely (workers included).
+    eval_off = ARGS.smoke or ARGS.eval_interval == 0
+    n_eval = 0 if eval_off else 2
 
     if ARGS.smoke:
         tune_hp.update(num_workers=1, num_envs_per_worker=2,
@@ -354,10 +446,13 @@ def main():
         "kl_target": 0.01,
         "entropy_coeff": tune_hp["entropy_coeff"],
         "normalize_actions": False,
-        "evaluation_interval": None if ARGS.smoke else ARGS.eval_interval,
-        "evaluation_duration": 16,
+        "evaluation_interval": None if eval_off else ARGS.eval_interval,
+        "evaluation_duration": 8,
         "evaluation_duration_unit": "episodes",
-        "evaluation_num_workers": 0 if ARGS.smoke else 2,
+        "evaluation_num_workers": n_eval,
+        # Eval rounds are off the critical path: a failed episode runs the full
+        # 6000-step cap, which is expensive to serialize into training.
+        "evaluation_parallel_to_training": not eval_off,
         "evaluation_config": {
             "explore": False,
             "env_config": {"seed_id": EVAL_SEED, "config": eval_cfg.dict()},
@@ -390,10 +485,14 @@ def main():
                 "hp": {k: v for k, v in tune_hp.items()},
                 "entropy_penalty": ARGS.entropy_penalty,
                 "cap": train_cfg.env.max_time_steps,
+                "eval_cap": eval_cfg.env.max_time_steps,
+                "eval_interval": None if eval_off else ARGS.eval_interval,
+                "resume": ARGS.resume, "wandb": WANDB_ENABLED,
                 "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
     print("[unified-config] " + json.dumps(resolved, sort_keys=True), flush=True)
 
-    n_eval = 0 if ARGS.smoke else 2
+    tune_callbacks = wandb_callbacks(run_name)
+
     num_cpus = ARGS.num_cpus or (tune_hp["num_workers"] + n_eval + 2)
     ray.init(num_cpus=num_cpus,
              object_store_memory=int(ARGS.object_store_gb * 1024**3),
@@ -423,12 +522,20 @@ def main():
         # TRAINING_RESULTS_DIR: docker/train_service.sh convention (the repo
         # mount is read-only there); default = <repo>/test_results (gitignored).
         local_dir=os.environ.get("TRAINING_RESULTS_DIR") or repo_path("test_results"),
-        checkpoint_freq=10,
+        # 848 = 8 x 106: freq 8 reproduces the exact checkpoint grid ck848 was
+        # harvested from. Everything is kept — Tune's keep_checkpoints_num
+        # scores on reward_mean, which is not the criterion of record, so it
+        # would prune on the wrong axis (~11MB each, in gitignored test_results).
+        checkpoint_freq=8,
         checkpoint_at_end=True,
         stop=stop,
         config=config,
         max_failures=3,
-        resume="AUTO" if ARGS.resume else False,
+        callbacks=tune_callbacks,
+        # AUTO+ERRORED restores the same trial/checkpoint after a process or
+        # container failure as well as a clean restart; plain AUTO skips the
+        # errored case, which is the one a restarting container is in.
+        resume="AUTO+ERRORED" if ARGS.resume else False,
     )
 
 

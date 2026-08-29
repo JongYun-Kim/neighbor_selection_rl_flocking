@@ -63,6 +63,10 @@ NEW_TOPLEVEL = {
                                  "C2 protocol counts episodes, not steps"),
     "evaluation_num_workers": (lambda v: isinstance(v, int) and v >= 0,
                                "dedicated eval workers; no training rollouts"),
+    "evaluation_parallel_to_training": (
+        lambda v: isinstance(v, bool),
+        "eval rounds run beside training instead of blocking it; does not "
+        "touch the training batch either way"),
     "evaluation_config": (
         lambda v: (isinstance(v, dict) and v.get("explore") is False
                    and v["env_config"]["config"]["env"]["is_training"] is False),
