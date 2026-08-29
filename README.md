@@ -147,7 +147,7 @@ python tools/check_ck848_parity.py --config /tmp/cfg.json --ref <path>/params.js
 | `callbacks.py`, `grad_logging_ppo.py` | shared RLlib callbacks / PPO subclass — pinned at the repo root: RLlib 2.1 pickles the custom policy class by module path into every checkpoint, so moving them would break existing loads |
 | `test_baselines.py` | repo-wide smoke/regression gate — keep it green |
 | `test_dynamic_k_nn.py` | Dynamic-k test suite (action conversion, padding, cross-size strict-load, short PPO rollout, legacy binary regression) — keep it green |
-| `studies/` | research record; per study: `PROBLEM` / `PLAN` / `RUNLOG` / `REPORT_KO`, plus the `src/` that ran it |
+| `studies/` | research record; per study: `PROBLEM` / `PLAN` / `RUNLOG` / `REPORT_KO`, plus the `src/` that ran it. `c2-regime-dual-policy/` compared the two methods under one regime and `legacy-ck848/` then corrected its headline — read that pair for why Dynamic-k is the main line |
 | `figures/` | paper-figure pipeline (`figures/README.md`) |
 | `checkpoints/` | canonical policy copies (binaries untracked; `PROVENANCE.md`) |
 | `docs/` | baseline catalog, heuristic-author guide, `DECISION_LOG.md` |

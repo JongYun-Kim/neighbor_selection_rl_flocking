@@ -42,7 +42,7 @@ entropy penalty**; pointer entropy decays 59.66 -> 15.41 over the run.
 Measured under the acs-confirm criterion of record (seeds 1500-1999, n=500,
 argmax, 6000 steps): ck848 = 100% success, t_conv 532, J 152.6, CVaR10 201.0 —
 the best of every arm measured at L250/N20. Full comparison and the robustness
-matrix: `/workspace/LEGACY848_REPORT.md`.
+matrix: `studies/legacy-ck848/REPORT_KO.md`.
 
 ## Reproduction (repo root, pinned stack, GPU)
 

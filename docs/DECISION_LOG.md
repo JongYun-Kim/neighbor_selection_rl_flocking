@@ -73,9 +73,13 @@ choices instead of silently training a different recipe.
   C2 numbers.
 - In-repo, untracked lane data: `studies/acs-confirm/data/eval/lp848_*_arms.csv`
   and `lp848_confirm_summary.csv` (study `data/` directories are gitignored).
-- External to this repo: `/workspace/LEGACY848_REPORT.md` (ck848 re-evaluation),
-  `/workspace/B8_B9_REPORT.md` (the C2-regime Dynamic-k arm), and
-  `/workspace/INTEGRATION_PLAN.md` (the plan whose premises these reverse).
+- In-repo (both imported 2026-08-29; they were `/workspace/LEGACY848_REPORT.md`
+  and `/workspace/B8_B9_REPORT.md` when this entry was written):
+  `studies/legacy-ck848/REPORT_KO.md` (ck848 re-evaluation) and
+  `studies/c2-regime-dual-policy/REPORT_KO.md` (the C2-regime Dynamic-k arm,
+  whose headline the former corrects).
+- Still external to this repo: `INTEGRATION_PLAN.md` (the plan whose premises
+  these reverse).
 
 ---
 
