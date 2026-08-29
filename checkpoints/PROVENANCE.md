@@ -6,6 +6,13 @@ checkpoint's parent directory) works unchanged. The checkpoint binaries are **no
 git-tracked** (only this file is); on a fresh clone this directory is empty — copy
 from the machine that has `test_results/`, or reproduce with the commands below.
 
+Unpack a handed-over archive at exactly the paths in the tables below: the layout
+*is* the contract, because every tool finds `params.json` by walking up from the
+checkpoint directory. One file is needed even when you are not re-measuring
+anything — the ck848 run's `params.json` (~2.6 KB), without which
+`tools/check_ck848_parity.py` exits with `FileNotFoundError`. Its `--ref` flag
+takes an out-of-tree path if you would rather not move the archive.
+
 | policy | path (under `checkpoints/`) | role |
 |---|---|---|
 | **π_E** | `c2C1_ft40_lmix_260808/manual/checkpoint_000080` | Headline efficiency policy (C1): weights-only fine-tune from A it40 over L-mix. Closes the J gap (−19/−1/+31 vs specialist). Confirmed in acs-confirm; sole registered miss: N10 failure 2.2% (n.s.), N-claim demoted per pre-registered mapping. |

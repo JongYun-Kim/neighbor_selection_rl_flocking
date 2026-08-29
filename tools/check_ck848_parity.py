@@ -202,7 +202,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", help="resolved config JSON (default: stdin)")
     ap.add_argument("--ref", default=DEFAULT_REF,
-                    help="ck848 params.json (default: the in-repo copy)")
+                    help="ck848 params.json (default: the copy under "
+                         "checkpoints/, which is gitignored and so absent on a "
+                         "fresh clone -- see README 'What a clone does not "
+                         "carry')")
     ap.add_argument("--skip-stop", action="store_true",
                     help="do not check the stop condition (for partial-budget "
                          "configs that are otherwise the ck848 recipe)")

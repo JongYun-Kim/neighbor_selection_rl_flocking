@@ -79,6 +79,60 @@ trainer, `eval/` and `tools/` run from any clone path. Scripts under `figures/`
 and `legacy/` still hardcode `/workspace/...` — keep the repo at `/workspace`
 (the docker setup does) or edit their `STUDY`/`REPO` constants.
 
+### What a clone does *not* carry
+
+Everything needed to **train and evaluate from scratch** is tracked; two kinds
+of binary artifact are not, and are handed over out of band:
+
+| artifact | why it is missing | what breaks without it |
+|---|---|---|
+| `checkpoints/**` (~69 MB) | `.gitignore` rule `checkpoints/*`; only `PROVENANCE.md` is tracked | nothing in training; you cannot re-measure the published policies, and `tools/check_ck848_parity.py` cannot run |
+| `test_results/**` | gitignored run artifacts | nothing — this is where your own runs land |
+
+**The ck848 parity reference.** `tools/check_ck848_parity.py` diffs a resolved
+`dknn` config against the archived `params.json` of the ck848 run. That file is
+~2.6 KB but lives inside the untracked `checkpoints/` tree, so on a fresh clone
+the gate exits with `FileNotFoundError`. Restore it by unpacking the handed-over
+ck848 directory at the path `PROVENANCE.md` records:
+
+```
+checkpoints/legacy_distance_pointer_260818/
+  PPO_neighbor_selection_flocking_env_8d07b_00000_0_2026-08-18_06-10-46/
+    params.json          <- the only file the parity gate needs
+    params.pkl
+    checkpoint_0008{48,56}/ checkpoint_0009{52,60,68,77}/   <- for re-measuring
+```
+
+`params.json` alone is enough for the gate; the checkpoint directories are only
+needed to re-run `eval/` against the policy of record. If you keep the archive
+elsewhere, point at it instead of moving it:
+
+```bash
+python train_unified.py --profile dknn --dry-run > /tmp/cfg.json
+python tools/check_ck848_parity.py --config /tmp/cfg.json --ref <path>/params.json
+```
+
+### Shared multi-GPU hosts
+
+- **A pre-set `CUDA_VISIBLE_DEVICES` wins over `--gpu`.** The trainer uses
+  `setdefault`, deliberately, so a scheduler's or container's allocation is
+  never overridden — but it means `export CUDA_VISIBLE_DEVICES=0` in your shell
+  makes `--gpu 2` a silent no-op. Either export nothing and use `--gpu`, or
+  export the allocation and drop `--gpu`. `FLOCK_GPU` is the env-var spelling of
+  `--gpu` and follows the same precedence.
+- **`--gpu` selects visibility, `--num-gpus` requests the learner's share.**
+  `--gpu 2` with the default `--num-gpus 1` gives the trial the one GPU it can
+  see. On a CPU-only host pass `--num-gpus 0`, or Tune leaves the trial PENDING
+  forever instead of failing.
+- **One run per GPU is the simple split**: `--gpu 0`, `--gpu 1`, … as separate
+  processes. `--seeds a,b` inside one process makes one Tune *trial* per seed
+  sharing whatever that process can see, which is not the same thing.
+- **Docker:** `GPU_REQUEST` is passed straight to `docker run --gpus` (default
+  `all`); use `GPU_REQUEST='"device=2"'` for a single card. The container
+  runtime sets `CUDA_VISIBLE_DEVICES` inside, so `FLOCK_GPU` is ignored there by
+  the precedence rule above — select the device with `GPU_REQUEST`. Give each
+  concurrent container its own `CONTAINER_NAME` and `--run-id`.
+
 ## Layout
 
 | path | what |
@@ -120,7 +174,9 @@ python train_unified.py --profile dknn --dry-run | python tools/check_ck848_pari
 
 - **ck848 parity.** `--dry-run` prints the resolved RLlib config as JSON;
   `tools/check_ck848_parity.py` diffs it against the archived `params.json` and
-  fails on anything not on its whitelist. Run it after touching a profile.
+  fails on anything not on its whitelist. Run it after touching a profile. It
+  needs the ck848 `params.json`, which a clone does not carry — see *What a
+  clone does not carry* above.
 - **Seeds.** `--seeds a,b,c` makes one Tune trial per seed; the RLlib `seed` of
   each trial follows its `env_config.seed_id`, and worker envs derive
   `seed + 10007*worker_index + 101*vector_index`.
