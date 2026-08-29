@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from scipy import stats
 
-from evaluate_checkpoint import (
+from legacy.evaluate_checkpoint import (
     create_env,
     RLPolicy,
     PureACSPolicy,

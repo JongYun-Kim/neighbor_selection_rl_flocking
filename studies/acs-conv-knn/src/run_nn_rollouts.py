@@ -29,7 +29,7 @@ CKPT = ("/workspace/test_results/hardtopk10_distaux_260529/"
 def main():
     import torch
     torch.set_num_threads(4)
-    from evaluate_checkpoint import RLPolicy          # heavy import (torch/ray)
+    from legacy.evaluate_checkpoint import RLPolicy   # heavy import (torch/ray)
     from envs.env import NeighborSelectionFlockingEnv, config_to_env_input
     from common import build_config, rollout, save_run
 

@@ -2,7 +2,7 @@
 import sys, os, json
 import numpy as np
 from scipy import stats as sp_stats
-from evaluate_checkpoint import (
+from legacy.evaluate_checkpoint import (
     create_env, RLPolicy, PureACSPolicy,
     monte_carlo_evaluation, print_comparison
 )
