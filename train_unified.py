@@ -12,7 +12,8 @@ Profiles
            params.json; tools/check_ck848_parity.py holds the allowed-diff
            whitelist and is the regression gate. This is the main line.
   pi_r     binary_vector + NeighborSelectionPPORLlib — the confirmed pi_R
-           recipe of train_robust.py --variant legacy, verbatim (aux
+           recipe of studies/acs-robust-train/src/train_robust.py
+           --variant legacy, verbatim (aux
            0.3/0.05, bernoulli head, lr 5e-4->1e-4@800k, batch 16000, 120
            iters ~= 1.92M steps), under the C2 training regime.
   dknn_c2  EXPERIMENTAL, not the canonical line: dynamic_k_nn under the SAME

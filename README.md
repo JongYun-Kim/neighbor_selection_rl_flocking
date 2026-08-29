@@ -1,111 +1,186 @@
-# Neighbor-Selection RL for Flocking — Binary Edge Selection × Dynamic-k NN
+# Neighbor-Selection RL for Flocking — Dynamic-k NN × Binary Edge Selection
 
-RL for **which neighbors to listen to** in a flocking swarm. Two policy families
-share one simulator (`NeighborSelectionFlockingEnv`) and one Transformer/pointer
-core; the low-level ACS/Vicsek controller inside the env turns the
-selected-neighbor subgraph into velocity updates (the policy never outputs motion
-commands directly):
+RL for **which neighbors to listen to** in a flocking swarm. The policy never
+outputs motion commands: it selects a neighbor subgraph, and the low-level
+ACS/Vicsek controller inside the simulator
+(`NeighborSelectionFlockingEnv`) turns that subgraph into velocity updates. Two
+policy families share the simulator and one Transformer/pointer core:
 
-- **`policy` — binary edge selection (main line)**: PPO outputs a binary adjacency
-  matrix per step (`action_type="binary_vector"`, model `NeighborSelectionPPORLlib`).
-- **`dynamic_knn` — cutoff-pointer dynamic k-NN**: for every ego agent the policy
-  points to one active cutoff agent; that agent and all active agents no farther
-  away become directed neighbors, so the number of external neighbors `k` changes
-  with the observation and policy output. Selecting the ego itself means `k=0`;
-  equal-distance ties are included (`action_type="dynamic_k_nn"`, model
-  `DynamicKNNPPORLlib` — same encoder/pointer core, ego-wise N-way categorical head).
+- **`dynamic_knn` — cutoff-pointer Dynamic-k NN (main line)**: for every ego
+  agent the policy points to one active *cutoff* agent; that agent and every
+  active agent no farther away become directed neighbors, so the number of
+  external neighbors `k` changes with the observation and the policy output.
+  Pointing at the ego itself means `k=0`; equal-distance ties are included
+  (`action_type="dynamic_k_nn"`, model `DynamicKNNPPORLlib` — encoder/pointer
+  core with an ego-wise N-way categorical head).
+- **`policy` — binary edge selection**: PPO outputs a binary adjacency matrix
+  per step (`action_type="binary_vector"`, model `NeighborSelectionPPORLlib`).
 
-## Current results (2026-08, binary-edge line)
+The reference point for both is the heuristic family in `baselines.py`: nearest-k
+selection at each fixed `k`, with **ACS FC** (fully connected, `k = N-1`) as the
+upper end of that sweep.
 
-The confirmed research line lives in `studies/` — a chronological chain ending at
-**`studies/acs-confirm/`** (pre-registered fresh-seed confirmation, 35/37 PASS).
-Start with `studies/acs-confirm/REPORT_KO.md` (Korean). Policies of record:
+## Current results (2026-08)
 
-- **π_E** — efficiency policy (`c2C1` fine-tune, it80)
-- **π_R** — reliability/"insurance" policy (`c2R1` scratch L-mix, it110)
+Everything below is measured under one **criterion of record (C2)**: 500 fresh
+seeds (1500–1999), N=20, L=250, deterministic (argmax) actions, 6000-step cap,
+convergence judged offline. That judge is the `eval/` package in this repo.
 
-Checkpoint binaries are **not in git**: see `checkpoints/PROVENANCE.md` for exact
-paths, provenance, and reproduction commands (copies live on the lab machine).
+At the training condition (L=250, N=20):
 
-The dynamic-k line has no committed checkpoints yet; it is retrained under the
-unified C2 regime on the integration branch (paired comparison in progress).
+| arm | failures / 500 | t_conv med | J med | CVaR10 J |
+|---|---|---|---|---|
+| **ck848 — Dynamic-k NN** | **0** | **532** | **152.6** | **201.0** |
+| π_R — binary edge, reliability | 0 | 554 | 180.9 | 269.6 |
+| π_E — binary edge, efficiency | 0 | 645.5 | 260.4 | 409.8 |
+| nearest k=12 (best fixed-k on J) | 32 | 521 | 160.6 | 350.6 |
+| nearest k=19 = ACS FC | 0 | 591.5 | 201.0 | 542.6 |
+
+**ck848 Pareto-dominates the entire fixed-k sweep** (k = 12–19): no arm has both
+fewer failures and a lower median J, and none matches its CVaR10. Against k=12
+the paired verdict is McNemar b=0 c=32, p=4.7e-10, co-success dJ median −10.4.
+
+Off its training scale it is a **specialist**, and the binary-edge policies
+remain the insurance: at L=500 ck848 fails 3.2% where π_R fails 0.2%; at L=125
+nearest k=12 converges more cheaply (J 141.5 vs 198.8). Across the **N** axis at
+matched density it holds up — 0/500 at both N=10 (L=177) and N=40 (L=354), where
+the best fixed-k reference fails 21 and 18 times respectively.
+
+Provenance, exact checkpoint paths and the reproduction commands:
+**`checkpoints/PROVENANCE.md`** (§ *Legacy Dynamic-k NN checkpoints* for ck848).
+Checkpoint binaries are **not in git**. The research record is `studies/`, a
+chronological chain ending at **`studies/acs-confirm/`** (pre-registered
+fresh-seed confirmation, 35/37 PASS) — start from its `REPORT_KO.md` (Korean).
+Per-study `data/` directories are untracked; the summary CSVs behind the table
+above live in `studies/acs-confirm/data/eval/`. Design decisions that reversed an
+earlier plan are logged in `docs/DECISION_LOG.md`.
 
 ## Setup
 
-Pinned stack — do not upgrade any of these without a coordinated bump (details in
-`CLAUDE.md`): Python 3.9, `torch==1.12.1+cu113`, `ray==2.1.0` (RLlib),
-`gym==0.23.1` (not Gymnasium), `pydantic==1.10.13` (v1 API), `numpy==1.23.4`,
-`wandb==0.22.3` (runtime requirement of the dynamic-k trainer; logging itself is
-opt-in).
+Pinned stack — do not upgrade any of these without a coordinated bump:
+
+| package | pin | note |
+|---|---|---|
+| Python | 3.9 | |
+| `torch` | 1.12.1+cu113 | |
+| `ray` | 2.1.0 | RLlib; the old `tune.run` API |
+| `gym` | 0.23.1 | **not** Gymnasium; `env.seed()` before `reset()` |
+| `pydantic` | 1.10.13 | v1 API (`@validator`, `.dict()`) |
+| `numpy` | 1.23.4 | |
+| `pandas` | 2.2.2 | |
+| `scipy` | 1.13.1 | |
+| `wandb` | 0.22.3 | logging is opt-in; see below |
 
 - pip: `pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu113`
 - or Docker: see `docker/` (same pins baked in; mounts the repo at `/workspace`)
 
-Many studies/figures scripts hardcode `/workspace/...` paths — keep the repo at
-`/workspace` (the docker setup does) or edit their `STUDY`/`REPO` constants.
+Repo-root resolution goes through `utils.paths` (`FLOCK_ROOT` overrides), so the
+trainer, `eval/` and `tools/` run from any clone path. Scripts under `figures/`
+and `legacy/` still hardcode `/workspace/...` — keep the repo at `/workspace`
+(the docker setup does) or edit their `STUDY`/`REPO` constants.
 
 ## Layout
 
 | path | what |
 |---|---|
 | `envs/env.py` | the entire simulator (`NeighborSelectionFlockingEnv`); serves both action encodings via `action_type` |
-| `models/` | PPO models — `ppo.py` (ego-centric core, current line), `ppo_dynamic_k_nn.py` (dynamic-k pointer subclass), `ppo_centralized.py` (legacy variant) |
-| `dynamic_k_nn/` | identifiers for the dynamic-k method (action type/encoding, model id, experiment names) |
-| `baselines.py` | heuristic baselines + `create_baseline` factory |
-| `callbacks.py`, `grad_logging_ppo.py` | shared RLlib callbacks / PPO subclass used by every trainer |
-| `train*.py` | current-line trainers (see below) |
-| `evaluate_checkpoint.py` | MC eval harness (centralized-variant checkpoints) |
+| `models/` | PPO models — `ppo.py` (ego-centric core), `ppo_dynamic_k_nn.py` (Dynamic-k pointer subclass), `ppo_centralized.py` (centralized-obs variant, dormant) |
+| `dynamic_k_nn.py` | identifiers for the Dynamic-k method (action type/encoding, model id, experiment names) |
+| `train_unified.py` | **the trainer** — all three profiles (see below) |
+| `eval/` | **criterion-of-record harness** — `eval_c2.py`, `run_knn_refs.py`, `pair_judge.py`, `stats.py`, `common.py` |
+| `tools/check_ck848_parity.py` | config-equivalence gate: the `dknn` profile vs the archived ck848 `params.json` |
+| `baselines.py` | heuristic baselines + `create_baseline` factory (nine dormant ones re-exported from `legacy/baselines_extra.py`) |
+| `callbacks.py`, `grad_logging_ppo.py` | shared RLlib callbacks / PPO subclass |
+| `evaluate_checkpoint.py` | MC eval harness for centralized-variant checkpoints — **not** the judge for the ego-centric policies |
 | `test_baselines.py` | repo-wide smoke/regression gate — keep it green |
-| `test_dynamic_k_nn.py` | dynamic-k test suite (action conversion, padding, cross-size strict-load, short PPO rollout, legacy binary regression) — keep it green |
-| `studies/` | research record; per study: `PROBLEM` / `PLAN` / `RUNLOG` / `REPORT_KO` |
+| `test_dynamic_k_nn.py` | Dynamic-k test suite (action conversion, padding, cross-size strict-load, short PPO rollout, legacy binary regression) — keep it green |
+| `studies/` | research record; per study: `PROBLEM` / `PLAN` / `RUNLOG` / `REPORT_KO`, plus the `src/` that ran it |
 | `figures/` | paper-figure pipeline (`figures/README.md`) |
-| `checkpoints/` | canonical policy copies (untracked; `PROVENANCE.md`) |
-| `docs/` | baseline catalog + guide for adding a heuristic |
-| `legacy/` | dormant Jan–May 2026 experiment scripts + frozen era log (`legacy/HANDOFF.md`) |
+| `checkpoints/` | canonical policy copies (binaries untracked; `PROVENANCE.md`) |
+| `docs/` | baseline catalog, heuristic-author guide, `DECISION_LOG.md` |
+| `legacy/` | retired trainers and dormant experiment scripts + frozen era log (`legacy/HANDOFF.md`) |
 
-**Primary entry point — `train_unified.py`** (integration line): one trainer for
-both methods under the shared C2 regime, selected by `--profile`:
+## Training — `train_unified.py`
 
-- `policy_robust` — binary edge selection, the confirmed π_R recipe of
-  `train_robust.py --variant legacy` verbatim (aux 0.3/0.05, bernoulli head).
-- `dknn_c2` — dynamic-k pointer under the same C2 regime (c2_shaping reward, C2
-  early termination, cap 2000, N=20, L-mix); D2 probe axes exposed as flags
-  (`--lr/--lr-end/--grad-clip/--entropy-coeff/--minibatch/...`).
-- `dknn_legacy` — the dknn original fixed-1000-step regime, preserved but not
-  part of the integration study (requires `--allow-legacy`).
+One trainer, three profiles:
 
-`--seeds a,b,c` makes one Tune trial per seed (worker envs derive
-`seed + 10007*worker_index + 101*vector_index`); `--gpu` sets
-`CUDA_VISIBLE_DEVICES` (unset = leave visibility untouched); W&B is off unless
-`WANDB_ENABLED=1`. Example: `python train_unified.py --profile dknn_c2 --gpu 1
---steps 500000`.
+| `--profile` | what | budget |
+|---|---|---|
+| **`dknn`** (default) | Dynamic-k NN under the **original ck848 recipe**: fixed 1000-step episodes, legacy shaped reward, minibatch 256, 10 SGD iters, lr 2e-5 → 1e-7 anchored at 8M | 8M steps |
+| `pi_r` | binary edge selection, the confirmed π_R recipe verbatim (aux 0.3/0.05, bernoulli head, batch 16000) under the C2 training regime | 120 iters ≈ 1.92M |
+| `dknn_c2` | **experimental, not the canonical line** — Dynamic-k under the C2 training regime (c2_shaping reward, C2 early termination, cap 2000, L-mix {125,250,500}); D2 probe axes exposed as flags | 2M steps |
 
-Single-method trainers (all preserved unchanged): `train.py` (documented
-baseline entry point for the binary-edge line; not the winning recipe),
-`train_c2_a.py` / `train_c2_b.py` (C2 arms A/B), `train_robust.py` (→ π_R),
-`train_robust2.py` (weights-only fine-tune, → π_E), `train_hardtopk.py`
-(Phase-14 ancestor of the C2 line), `train_dynamic_knn.py` (dynamic-k original
-trainer, env-var configured — the 6M-step fixed-length recipe validated on an
-i9-9900KF + RTX 3090: 8 workers × 2 envs, batch 8192, lr `2e-5`→`1e-7`; every
-value overridable via the environment variables listed by
-`./docker/run_train.sh --help`).
+```bash
+python train_unified.py                                  # dknn, 8M steps
+python train_unified.py --profile pi_r --gpu 1
+python train_unified.py --profile dknn --seeds 42,1042 --gpu 1,3
+python train_unified.py --profile dknn --smoke           # 2-iteration CPU smoke
+python train_unified.py --profile dknn --dry-run         # resolved config, no run
+python train_unified.py --profile dknn --dry-run | python tools/check_ck848_parity.py
+```
 
-## Evaluating / extending
+- **ck848 parity.** `--dry-run` prints the resolved RLlib config as JSON;
+  `tools/check_ck848_parity.py` diffs it against the archived `params.json` and
+  fails on anything not on its whitelist. Run it after touching a profile.
+- **Seeds.** `--seeds a,b,c` makes one Tune trial per seed; the RLlib `seed` of
+  each trial follows its `env_config.seed_id`, and worker envs derive
+  `seed + 10007*worker_index + 101*vector_index`.
+- **In-training evaluation.** Every profile evaluates under the **same C2
+  protocol** it will be judged by offline: 8 argmax episodes every 16 iterations
+  (`--eval-interval`, `0` = off), c2 termination, L=250, cap 6000
+  (`--eval-cap`), on dedicated workers running parallel to training. It is a
+  monitoring signal — checkpoint selection is decided offline by `eval/`.
+  `--cap` applies to the training env only.
+- **Checkpoints.** Every 8 iterations, all kept, plus one at the end (848 = 8 ×
+  106, so a reproduction run lands on the grid ck848 came from). ~11 MB each,
+  under gitignored `test_results/`.
+- **GPU.** `--gpu` sets `CUDA_VISIBLE_DEVICES`; `--num-gpus` is the RLlib
+  learner request (default 1). **On a CPU-only host pass `--num-gpus 0`** —
+  otherwise the trial requests a GPU and Tune leaves it PENDING instead of
+  failing. `--smoke` forces both off.
+- **Resume.** `--resume`, or `FLOCK_RESUME=1`, restores the same Tune trial
+  (`AUTO+ERRORED`) after a process failure, container restart or host reboot.
 
-- Criterion-of-record evaluation: `studies/acs-confirm/src/` (`eval_c2_r3.py`,
-  `run_knn_refs3.py`, `confirm_judge.py`). Earlier studies carry older copies of
-  `eval_c2.py` — **always use the acs-confirm copies**.
-- Adding a heuristic baseline: `docs/FOR_HEURISTIC_DEVELOPERS.md`, then run
+## Evaluating
+
+The criterion of record is the `eval/` package. Run it **from the repo root**,
+as modules:
+
+```bash
+# a checkpoint on the confirmation lane
+python -m eval.eval_c2 --ckpt <checkpoint_000848 dir> --label lp848 \
+    --seeds 1500-1999 --workers 24
+# screen a whole run by its in-training eval metrics first
+python -m eval.eval_c2 --rank-runs test_results/<run>/
+# fixed-k references
+python -m eval.run_knn_refs --k 12,19 --L 250 --seeds 1500-1999 --workers 15
+# arm-pair matrix: Wilson CI, exact McNemar, CVaR10, co-success paired dJ
+python -m eval.pair_judge --seeds 1500-1999 \
+    --arm pol=lp848 --arm k12=knnref:12,250,20
+```
+
+Output goes to the gitignored `test_results/{eval,knnref}/`; `--outdir` /
+`--base` point the tools at another directory (e.g. a study's archived lane).
+Method dispatch is automatic: the checkpoint's `params.json` decides between the
+pointer and binary policies, and both the pre- and post-rename Dynamic-k
+identifiers are accepted.
+
+The copies under `studies/*/src/` are the **records** of the studies that
+produced them — kept unmodified, not the version to run. `eval/` reproduces the
+acs-confirm lane exactly (verified seed-by-seed at promotion time).
+
+Extending:
+
+- Adding a heuristic baseline: `docs/FOR_HEURISTIC_DEVELOPERS.md`, then
   `python test_baselines.py`.
-- Dynamic-k test suite: `python -m unittest -v test_dynamic_k_nn` (also runnable
-  inside the Docker image, see below).
+- Dynamic-k test suite: `python -m unittest -v test_dynamic_k_nn`.
 
 ## W&B logging (optional)
 
-`wandb==0.22.3` is pinned in `requirements.txt`. The dynamic-k trainer logs to
-W&B **when `WANDB_ENABLED` is truthy** (its own default is on; set
-`WANDB_ENABLED=false` to train offline). Store the API key in a private file the
-runner mounts read-only (never in env vars or argv):
+`train_unified.py` logs to W&B **only when `WANDB_ENABLED` is truthy** (default:
+off). When it is on, a non-empty API key file is required or the run fails
+immediately. Store the key in a private file the runner mounts read-only (never
+in env vars or argv):
 
 ```bash
 mkdir -p ~/.config/wandb
@@ -114,7 +189,9 @@ ${EDITOR:-vi} ~/.config/wandb/api_key
 chmod 600 ~/.config/wandb/api_key
 ```
 
-The default project is `nb-selection-dynamic-k-nn`; override with `WANDB_PROJECT`.
+`WANDB_API_KEY_FILE` selects the path (default `/run/secrets/wandb_api_key`),
+`WANDB_PROJECT` the project (default `nb-selection-dynamic-k-nn`) and
+`WANDB_RUN_NAME` the run name (default: the Tune experiment name).
 
 ## Durable background training (Docker)
 
@@ -123,27 +200,30 @@ Build the Python 3.9 / Ray 2.1 / CUDA 11.3 image with `./docker/build.sh`
 Start a named run in a detached container:
 
 ```bash
-./docker/run_train.sh start --run-id dynamic-k-n20-seed42
+./docker/run_train.sh start --run-id dknn-n20-seed42
 ./docker/run_train.sh status | logs | stop
 ```
 
-The service entry point is selectable via `TRAIN_ENTRY` (default
-`train_unified.py`, profile via `FLOCK_PROFILE`; set
-`TRAIN_ENTRY=train_dynamic_knn.py` for the original dynamic-k recipe — see
-`docker/train_service.sh`). Results land under `test_results/<run-id>/` on the
-host. The container uses `restart=unless-stopped` and Ray Tune uses
-`AUTO+ERRORED`, so an unexpected process/container/host restart resumes from the
-latest checkpoint; after success the service writes `.training_complete` and
-stays idle. A deliberate `stop` is not auto-restarted (resume with
-`docker start <container>`). Use a different `CONTAINER_NAME` for concurrent
-containers. Example overrides:
+The service runs `TRAIN_ENTRY` (default `train_unified.py`) with
+`FLOCK_PROFILE` (default `dknn`) and exports `FLOCK_RESUME=1`, so the container's
+`restart=unless-stopped` policy and Tune's `AUTO+ERRORED` together resume the
+same trial from its latest checkpoint after any unexpected
+process/container/host restart. After success the service writes
+`.training_complete` and stays idle; a deliberate `stop` is not auto-restarted
+(resume with `docker start <container>`). Results land under
+`test_results/<run-id>/` on the host. Use a different `CONTAINER_NAME` for
+concurrent containers. Example overrides:
 
 ```bash
-WANDB_PROJECT=my-project BASE_ENV_SEED=7 \
-TOTAL_TRAINING_TIMESTEPS=1000000 \
-CONTAINER_NAME=dynamic-k-seed7 \
-./docker/run_train.sh start --run-id dynamic-k-n20-seed7
+FLOCK_PROFILE=pi_r FLOCK_SEEDS=7 \
+CONTAINER_NAME=pir-seed7 \
+./docker/run_train.sh start --run-id pir-n20-seed7
 ```
+
+Setting `TRAIN_ENTRY=legacy/train_dynamic_knn.py` runs the retired env-var-driven
+Dynamic-k trainer instead; note its defaults are the *accelerated* variant
+(minibatch 512 / 7 SGD iters / 6M steps), not the ck848 recipe. See
+`docker/train_service.sh`.
 
 Tests inside the image:
 
