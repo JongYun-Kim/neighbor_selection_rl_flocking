@@ -1,6 +1,11 @@
 """
 Monte Carlo evaluation comparing trained RL policy vs Pure ACS (no neighbor selection).
 
+RETIRED (2026-08-29): this implements the pre-C2 Monte Carlo criterion, not the
+criterion of record. The judge of record is eval/ (see eval/eval_c2.py), and the
+active successor of RLPolicy is eval/policies.py. Kept runnable for the legacy
+probes that still import it; run those from the repo root with PYTHONPATH=.
+
 Compares:
 1. Trained Centralized RL Policy (from checkpoint)
 2. Pure ACS (Fully Connected Network - no neighbor selection)
@@ -21,7 +26,7 @@ from collections import defaultdict
 from tqdm import tqdm
 
 from envs.env import NeighborSelectionFlockingEnv, load_config
-from models.ppo_centralized import NeighborSelectionPPORLlibCentralized
+from legacy.ppo_centralized import NeighborSelectionPPORLlibCentralized
 from models.ppo import NeighborSelectionPPORLlib
 
 

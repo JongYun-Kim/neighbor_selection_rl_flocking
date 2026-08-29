@@ -1,22 +1,26 @@
-"""Fresh k-NN reference rollouts + offline C2 judgment (study acs-robust-r2).
+"""Fixed-k reference rollouts + offline C2 judgment.
 
-Covers conditions absent from acs-c2-train's frontier_L.csv: L=75, N-axis
-probes (N=10/40), and big-n seeds 1032+. Uses the predecessor's canonical
-episode runner (acs-conv-knn common.run_episode) and the same offline C2
-judge as eval_c2.py, so rows are directly comparable/mergeable with
-frontier_L.csv (columns k,L,seed,t_fire,J,success + n_agents).
+Runs the nearest-k baseline through the canonical episode runner
+(eval.common.run_episode) and the same offline C2 judge as eval.eval_c2, so
+rows are directly comparable/mergeable with policy summaries (columns
+k,L,seed,t_fire,J,success + n_agents).
 
-Usage:
-  python run_knn_refs.py --k 12 --L 250 --seeds 1032-1499 --workers 15
-  python run_knn_refs.py --k 8,10,12,19 --L 75 --seeds 1000-1031 --workers 10
-  python run_knn_refs.py --k 6,8,9 --L 177 --n-agents 10 --seeds 1000-1031
+Usage (always from the repo root):
+  python -m eval.run_knn_refs --k 12 --L 250 --seeds 1032-1499 --workers 15
+  python -m eval.run_knn_refs --k 8,10,12,19 --L 75 --seeds 1000-1031 --workers 10
+  python -m eval.run_knn_refs --k 6,8,9 --L 177 --n-agents 10 --seeds 1000-1031
 
-Outputs: data/knnref/k{k}_L{L}_N{n}/ (per-seed npz, cached) +
-         data/knnref/k{k}_L{L}_N{n}_summary.csv
+Outputs: <outdir>/k{k}_L{L}_N{n}/ (per-seed npz, cached) +
+         <outdir>/k{k}_L{L}_N{n}_summary.csv
+(default outdir: test_results/knnref, the sibling of the eval outdir that
+eval.pair_judge expects).
+
+Promoted from studies/acs-confirm/src/run_knn_refs3.py, which stays in place
+as the record of that study. The rollout/judge logic is unchanged; the diff is
+path resolution, imports, and the --outdir flag.
 """
 import argparse
 import os
-import sys
 from multiprocessing import Pool
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -26,15 +30,10 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 
 import numpy as np
 
-_ROOT = os.environ.get("FLOCK_ROOT") or os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-STUDY = os.path.join(_ROOT, "studies", "acs-confirm")
-PRED = os.path.join(_ROOT, "studies", "acs-conv-knn")
-sys.path.insert(0, os.path.join(PRED, "src"))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)
+from utils.paths import repo_path
+from eval.eval_c2 import t_fire_c2  # same offline judge as the policy evals
 
-from eval_c2_r3 import t_fire_c2  # noqa: E402  (same offline judge as policy evals)
+DEFAULT_OUTDIR = repo_path("test_results", "knnref")
 
 
 def run_one(args):
@@ -42,7 +41,7 @@ def run_one(args):
     out = os.path.join(outdir, f"k{k}_L{L:g}_N{n_agents}_s{seed}.npz")
     if os.path.exists(out):
         return out
-    from common import run_episode, save_run
+    from eval.common import run_episode, save_run
     rec, snaps, ts, meta = run_episode(k=k, n_agents=n_agents, max_steps=steps,
                                        initial_position_bound=L, seed=seed,
                                        pos_stride=10)
@@ -69,6 +68,9 @@ def main():
     ap.add_argument("--seeds", default="1000-1031")
     ap.add_argument("--steps", type=int, default=6000)
     ap.add_argument("--workers", type=int, default=10)
+    ap.add_argument("--outdir", default=DEFAULT_OUTDIR,
+                    help="base directory for npz + summary CSV "
+                         "(default: test_results/knnref)")
     args = ap.parse_args()
 
     ks = [int(x) for x in args.k.split(",")]
@@ -80,7 +82,7 @@ def main():
     import pandas as pd
     for k in ks:
         cond = f"k{k}_L{args.L:g}_N{args.n_agents}"
-        outdir = os.path.join(STUDY, "data", "knnref", cond)
+        outdir = os.path.join(args.outdir, cond)
         os.makedirs(outdir, exist_ok=True)
         jobs = [(k, args.L, args.n_agents, args.steps, s, outdir) for s in seeds]
         with Pool(args.workers) as pool:
@@ -90,7 +92,7 @@ def main():
         import glob as globmod
         paths = globmod.glob(os.path.join(outdir, "*.npz"))
         df = pd.DataFrame([judge_npz(p) for p in sorted(paths)]).sort_values("seed")
-        csv_path = os.path.join(STUDY, "data", "knnref", f"{cond}_summary.csv")
+        csv_path = os.path.join(args.outdir, f"{cond}_summary.csv")
         df.to_csv(csv_path, index=False)
         det = df[df.success == 1]
         print(f"=== {cond}: {len(df)} seeds ===")

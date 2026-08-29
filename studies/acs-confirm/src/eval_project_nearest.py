@@ -23,11 +23,13 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 
 import numpy as np
 
-STUDY = "/workspace/studies/acs-confirm"
-PRED = "/workspace/studies/acs-conv-knn"
+_ROOT = os.environ.get("FLOCK_ROOT") or os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+STUDY = os.path.join(_ROOT, "studies", "acs-confirm")
+PRED = os.path.join(_ROOT, "studies", "acs-conv-knn")
 sys.path.insert(0, os.path.join(PRED, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, "/workspace")
+sys.path.insert(0, _ROOT)
 
 from eval_c2_r3 import C2Policy, ForensicsWrapper, judge_npz  # noqa: E402
 

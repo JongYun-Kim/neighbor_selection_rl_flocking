@@ -24,6 +24,14 @@ from models.modules.pointer_net import RawAttentionScoreGenerator, RawAttentionS
 
 
 class NeighborSelectionPPORLlib(TorchModelV2, nn.Module):
+    # The Dynamic-k NN subclass opts into padding-aware encoder masks while
+    # the legacy binary model retains its original behavior and state dict.
+    respect_padding_mask = False
+
+    @staticmethod
+    def required_num_outputs(action_size: int) -> int:
+        return 2 * (action_size ** 2)
+
     def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kwargs):
         nn.Module.__init__(self)  # Initialize nn.Module first
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
@@ -176,8 +184,9 @@ class NeighborSelectionPPORLlib(TorchModelV2, nn.Module):
         )
 
         action_size = action_space.shape[0]  # num_agents_max?
-        assert num_outputs == 2 * (action_size**2), \
-            f"num_outputs != 2 * (action_size^2); num_output = {num_outputs}, action_size = {action_size}"
+        required_num_outputs = self.required_num_outputs(action_size)
+        assert num_outputs == required_num_outputs, \
+            f"num_outputs != {required_num_outputs}; num_output = {num_outputs}, action_size = {action_size}"
 
         # 2. Define policy network
         self.actor = NeighborSelectorTorch(
@@ -187,6 +196,7 @@ class NeighborSelectionPPORLlib(TorchModelV2, nn.Module):
             generator=generator,
             d_embed_context=d_embed_context,
             global_stats_dim=4 if self.use_global_stats else 0,
+            respect_padding_mask=self.respect_padding_mask,
         )
 
         # 2b. Per-agent threshold head (selection_head == "threshold" only).
@@ -211,6 +221,7 @@ class NeighborSelectionPPORLlib(TorchModelV2, nn.Module):
                 decoder=DecoderPlaceholder(),
                 generator=RawAttentionScoreGeneratorPlaceholder(),
                 d_embed_context=d_embed_context,
+                respect_padding_mask=self.respect_padding_mask,
             )
 
         # 3b. Global-stats conditioning of the critic's pooled vector
@@ -471,7 +482,10 @@ class NeighborSelectionPPORLlib(TorchModelV2, nn.Module):
         self._last_pa_pg_loss = None
         self._last_dist_aux_loss = None
 
-        if self.aux_enabled and hasattr(self, '_aux_target'):
+        # Guard on the cache CONTENT, not attribute existence: __init__ pre-sets
+        # these to None, and subclasses that override forward() (e.g. the
+        # dynamic-k pointer model) never populate them — aux must then no-op.
+        if self.aux_enabled and getattr(self, '_aux_target', None) is not None:
             target = self._aux_target
             pad = self._aux_padding_mask
             nm = self._aux_neighbor_masks
@@ -612,7 +626,7 @@ class NeighborSelectionPPORLlib(TorchModelV2, nn.Module):
 
 class NeighborSelectorTorch(nn.Module):
     def __init__(self, src_embed, encoder, decoder, generator, d_embed_context,
-                 global_stats_dim=0):
+                 global_stats_dim=0, respect_padding_mask=False):
 
         super().__init__()
 
@@ -623,6 +637,7 @@ class NeighborSelectorTorch(nn.Module):
         self.decoder = decoder
         self.generator = generator
         self.d_embed_context = d_embed_context
+        self.respect_padding_mask = respect_padding_mask
 
         # Optional global swarm-stats conditioning of the decoder query context
         # (study acs-c2-train): h_c <- Linear([h_c || global_stats]).
@@ -677,6 +692,8 @@ class NeighborSelectorTorch(nn.Module):
         # shape => (i, b, neighbor) => flatten => (i*b, neighbor).
         expanded_padding_mask = padding_mask.unsqueeze(0).expand(num_agents_max, -1, -1)
         flat_padding_mask_for_neighbors = expanded_padding_mask.reshape(num_agents_max * batch_size, num_agents_max)
+        if self.respect_padding_mask:
+            flat_network = flat_network.bool() & flat_padding_mask_for_neighbors.bool()
 
         # local_padding_flags = padding_mask[:, i], but we want the same flatten order (i,b).
         # So permute(1,0) => (i, b) => flatten => (i*b).
@@ -738,6 +755,10 @@ class NeighborSelectorTorch(nn.Module):
 
         # Now average across the actual number of agents (not counting padding).
         num_agents_per_sample = num_agents_per_sample.view(-1, 1, 1).float()  # (batch_size, 1, 1)
+        if self.respect_padding_mask:
+            # RLlib may construct an all-zero dummy observation while probing a
+            # model. Real environment observations always contain active agents.
+            num_agents_per_sample = num_agents_per_sample.clamp(min=1.0)
         average_h_c_N = h_c_N_accumulator / num_agents_per_sample  # (batch_size, 1, d_embed_context)
 
         # Per-agent context vectors (for auxiliary heads). Padded rows are exactly zero
@@ -840,7 +861,7 @@ class NeighborSelectorTorch(nn.Module):
             h_c_N[non_padded_mask] = h_c_N_np
             sub_att_scores[non_padded_mask] = sub_att_scores_np
             encoder_out_full[non_padded_mask] = encoder_out
-        else:
+        elif not self.respect_padding_mask:
             print("WARNING All samples are padded in the batch. If this is not expected such as "
                   "parallelized forward, check the padding mask.")
 

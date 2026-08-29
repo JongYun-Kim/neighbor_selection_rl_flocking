@@ -27,8 +27,9 @@ _ap = argparse.ArgumentParser()
 _ap.add_argument("--run-name", required=True)
 _ap.add_argument("--init-ckpt", required=True,
                  help="checkpoint_0000NN dir holding policies/default_policy/policy_state.pkl")
-_ap.add_argument("--gpu", choices=["1", "3"], default=None,
-                 help="required for full runs; ignored for --smoke/--init-check (CPU)")
+_ap.add_argument("--gpu", default=os.environ.get("FLOCK_GPU"),
+                 help="CUDA device index; required for full runs (or set FLOCK_GPU); "
+                      "ignored for --smoke/--init-check (CPU)")
 _ap.add_argument("--variant", choices=["legacy", "r0log"], default="legacy",
                  help="obs_position_scale (round 2 uses legacy for both runs)")
 _ap.add_argument("--lr-flat", type=float, default=1e-4,
@@ -43,9 +44,14 @@ ARGS = _ap.parse_args()
 
 CPU_ONLY = ARGS.smoke or ARGS.init_check
 if not CPU_ONLY:
-    assert ARGS.gpu is not None, "--gpu {1,3} required for a full run"
-os.environ["CUDA_VISIBLE_DEVICES"] = "" if CPU_ONLY else ARGS.gpu
+    assert ARGS.gpu is not None, "--gpu <index> (or FLOCK_GPU) required for a full run"
+if CPU_ONLY:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+else:
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", ARGS.gpu)
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+from utils.paths import repo_path  # noqa: E402
 
 import numpy as np  # noqa: E402
 import ray  # noqa: E402
@@ -63,12 +69,12 @@ MODEL_NAME = "neighbor_selector_rl"
 BASE_SEED = 42          # identical to round-1 R1: init ckpt stays the ONLY variable
 EVAL_SEED = 900000
 L_POOL = [125.0, 250.0, 500.0]
-LOGDIR = os.path.join("/workspace/test_results", ARGS.run_name, "manual")
+LOGDIR = os.path.join(repo_path("test_results"), ARGS.run_name, "manual")
 
 
 def build_env_config(is_training: bool) -> dict:
     # Absolute path: background launches must not depend on the shell cwd.
-    my_config = load_config("/workspace/envs/default_env_config.yaml")
+    my_config = load_config(repo_path("envs", "default_env_config.yaml"))
 
     # environment configs (A-line C2 block, identical to round-1 train_robust.py)
     my_config.env.action_type = "binary_vector"

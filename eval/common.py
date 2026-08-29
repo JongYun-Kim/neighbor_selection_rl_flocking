@@ -1,4 +1,4 @@
-"""Shared rollout + metric utilities for the ACS k-NN convergence study.
+"""Shared rollout + metric utilities for the criterion-of-record eval harness.
 
 Read-only w.r.t. repo code: imports envs.env and baselines as-is (no modification).
 All physical quantities are logged in raw env units (meters, m/s, radians, steps).
@@ -16,25 +16,23 @@ Key repo facts this module relies on (see NOTES_env.md):
 - Env metrics: spatial_entropy = sqrt(sum var(xy)), velocity_entropy =
   sqrt(sum var(v)) over active agents; exposed per step in info (task_type='acs').
   We recompute both ourselves and cross-check against info when available.
+
+Promoted from studies/acs-conv-knn/src/common.py, which stays in place as the
+record of the ACS k-NN convergence study. The module body is unchanged; only
+path resolution and imports differ here (repo root via utils.paths instead of
+a sys.path insert).
 """
 import json
 import os
-import sys
 
 import numpy as np
 
-# Repo root: FLOCK_ROOT when set, else resolved from this file's location
-# (studies/acs-conv-knn/src/common.py -> 4 levels up). Both equal /workspace
-# in the canonical deployment.
-REPO = os.environ.get("FLOCK_ROOT") or os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-if REPO not in sys.path:
-    sys.path.insert(0, REPO)
+from envs.env import NeighborSelectionFlockingEnv, load_config, config_to_env_input
+from baselines import create_baseline
+from utils.paths import repo_path
 
-from envs.env import NeighborSelectionFlockingEnv, load_config, config_to_env_input  # noqa: E402
-from baselines import create_baseline  # noqa: E402
+DEFAULT_YAML = repo_path("envs", "default_env_config.yaml")
 
-DEFAULT_YAML = os.path.join(REPO, "envs", "default_env_config.yaml")
 
 SERIES_NAMES = [
     "s_ent",        # spatial entropy, own computation (m)

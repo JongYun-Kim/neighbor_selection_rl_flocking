@@ -21,13 +21,20 @@ class FlockingCallbacks(DefaultCallbacks):
         if cr is not None:
             episode.custom_metrics["final_conn_ratio"] = float(cr)
 
-        max_steps = 1000
+        # flocking_success reads "the episode terminated before the cap", which
+        # only carries information when early termination is enabled. Under a
+        # fixed episode length every episode runs the full horizon, so the
+        # metric is a constant and only clutters the progress table.
+        max_steps, fixed_length = 1000, False
         try:
             env = base_env.get_sub_environments()[0]
             max_steps = env.config.env.max_time_steps
+            fixed_length = bool(env.config.env.use_fixed_episode_length)
         except Exception:
             pass
-        episode.custom_metrics["flocking_success"] = float(episode.length < max_steps)
+        if not fixed_length:
+            episode.custom_metrics["flocking_success"] = float(
+                episode.length < max_steps)
 
     def on_postprocess_trajectory(self, *, worker, episode, agent_id,
                                   policy_id, policies, postprocessed_batch,
