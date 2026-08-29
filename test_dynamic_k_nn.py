@@ -10,7 +10,7 @@ import torch
 from ray.rllib.models import ModelCatalog
 
 from baselines import RandomNeighborSelection
-from dynamic_k_nn.identifiers import ACTION_TYPE
+from dynamic_k_nn import ACTION_TYPE
 from envs.env import (
     Config,
     NeighborSelectionFlockingEnv,

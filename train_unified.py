@@ -133,7 +133,7 @@ from ray.tune.registry import register_env  # noqa: E402
 from envs.env import NeighborSelectionFlockingEnv, load_config  # noqa: E402
 from models.ppo import NeighborSelectionPPORLlib  # noqa: E402
 from models.ppo_dynamic_k_nn import DynamicKNNPPORLlib  # noqa: E402
-from dynamic_k_nn.identifiers import (  # noqa: E402
+from dynamic_k_nn import (  # noqa: E402
     ACTION_TYPE, MODEL_ID, WANDB_PROJECT as DEFAULT_WANDB_PROJECT)
 from callbacks import C2Callbacks  # noqa: E402
 from grad_logging_ppo import GradLoggingPPO  # noqa: E402

@@ -1,3 +1,12 @@
+"""Retired: superseded by train_unified.py --profile dknn.
+
+Kept as the record of the env-var-driven, W&B-integrated training service that
+produced the Dynamic-k NN runs of August 2026. Note that the defaults here are
+the ACCELERATED variant (minibatch 512 / 7 SGD iters / 6M steps / 18h cap),
+not the ck848 original recipe (256 / 10 / 8M) that the dknn profile
+reproduces; ck848's own config is preserved next to its weights in
+checkpoints/legacy_distance_pointer_260818/.../params.json.
+"""
 import os
 import json
 import multiprocessing as mp
@@ -9,7 +18,7 @@ from ray.air.callbacks.wandb import WandbLoggerCallback
 from ray.rllib.models import ModelCatalog
 from ray.tune.registry import register_env
 
-from dynamic_k_nn.identifiers import (
+from dynamic_k_nn import (
     ACTION_ENCODING,
     ACTION_TYPE,
     EXPERIMENT_NAME,

@@ -11,7 +11,7 @@ from ray.rllib.utils.typing import (
     MultiAgentDict,
 )
 from ray.tune.logger import pretty_print
-from dynamic_k_nn.identifiers import ACTION_TYPE
+from dynamic_k_nn import ACTION_TYPE
 from utils.utils import (wrap_to_pi, wrap_to_rectangle,
                               get_rel_pos_dist_in_periodic_boundary, map_periodic_to_continuous_space)
 from typing import List, Optional
