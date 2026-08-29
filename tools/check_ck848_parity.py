@@ -217,6 +217,13 @@ def main():
     payload = json.loads(raw)
     new = payload.get("config", payload)
     stop = payload.get("stop")
+    if not os.path.exists(args.ref):
+        raise SystemExit(
+            "ck848 reference params.json not found:\n  {}\n"
+            "checkpoints/ is gitignored, so a fresh clone does not carry it. "
+            "Unpack the handed-over ck848 archive at that path (params.json "
+            "alone is enough for this gate), or pass --ref <path>. See README "
+            "'What a clone does not carry'.".format(args.ref))
     with open(args.ref) as fh:
         ref = json.load(fh)
 
