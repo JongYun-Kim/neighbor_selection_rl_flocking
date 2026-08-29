@@ -156,3 +156,71 @@ record what was true when they were written; this entry is the pointer.
 - **Checkpoints: freq 8, keep everything.** Tune's `keep_checkpoints_num` scores
   on `episode_reward_mean`, which is not the criterion of record, so it would
   prune on the wrong axis.
+
+---
+
+## 2026-08-29 — Two main methods in the tree; the earlier "stay put" is reversed
+
+### What changed
+
+The repo now has exactly two live methods — Dynamic-k NN (`dknn`, cutoff
+pointer) and binary edge selection (the π_R line) — and the tree is arranged so
+that a reader sees only those two as current work:
+
+| was | now |
+|---|---|
+| `evaluate_checkpoint.py` (repo root) | `legacy/evaluate_checkpoint.py` |
+| `models/ppo_centralized.py` | `legacy/ppo_centralized.py` |
+| `models/beta_dist.py` | `legacy/beta_dist.py` |
+| checkpoint→policy loaders inside `eval/eval_c2.py` | `eval/policies.py` |
+
+`models/` is now exactly the two live heads, `models.__all__` with it.
+
+### Why this reverses the earlier entry
+
+The "Other consolidation decisions" entry above records these three files as
+**staying put**. That decision rested on one premise: `studies/` and `legacy/`
+`.py` were under a records freeze, so an importer inside them could not be
+repointed, and moving a file would have broken a record script. That freeze has
+since been lifted for **import lines only** — logic, constants and numbers in
+`studies/`/`legacy/` `.py` stay untouched, and the `.md` records stay untouched
+entirely. With repointing allowed, the cost side of that trade is gone, and the
+benefit side grew: the tree itself is the first thing a reader uses to tell what
+the current methods are, and four model-shaped files plus a second root-level
+evaluator misrepresented that.
+
+`studies/` and `legacy/` stay runnable, not frozen-broken. Five import sites
+were repointed (`legacy/eval_hardtopk.py`, `legacy/eval_stat.py`,
+`studies/acs-conv-knn/src/run_nn_rollouts.py`, `legacy/evaluate_checkpoint.py`,
+and the three `beta_dist` trainers), plus the script path in
+`legacy/run_eval.sh`. The run convention is uniform: **from the repo root with
+`PYTHONPATH=.`**. ModelCatalog registration strings (e.g. the `"beta_dist"`
+`custom_action_dist` name) were deliberately not renamed — those names are a
+contract with checkpoints written under them.
+
+`studies/` remains a time-boxed record of the period that established the C2
+criterion and is expected to be re-collected and dropped once new models land;
+`legacy/` is dead code. Neither is a place to look for the current method.
+
+### Why `grad_logging_ppo.py` and `callbacks.py` stay at the repo root
+
+They are the one exception to the tidy-up, and deliberately so. RLlib 2.1
+pickles the custom policy **class by module path** into every checkpoint, which
+is what the "Raw policy class may cause problems ..." warning in the training
+logs is about. Verified on disk rather than assumed: in a GradLoggingPPO run's
+`.../checkpoint_000040/policies/default_policy/policy_state.pkl`
+(`test_results/uni_policy_robust_s42/`), the bytes
+`\x8c\x10grad_logging_ppo \x8c\x19GradLoggingPPOTorchPolicy \x93` are a
+`STACK_GLOBAL` resolving `grad_logging_ppo.GradLoggingPPOTorchPolicy` by name at
+load time — one such reference per checkpoint. Moving either module would make
+every existing GradLoggingPPO checkpoint fail to unpickle. They stay at the
+root until a checkpoint-migration step exists.
+
+### Gates
+
+`eval/policies.py` was a verbatim split: the five moved definitions are
+byte-identical to the originals, and ck848 on seeds 1500–1504 reproduced
+`studies/acs-confirm/data/eval/lp848_confirm_summary.csv` exactly — all 13
+columns, `success`/`t_fire` equal as integers, max relative float deviation 0.0.
+Each commit also cleared `test_dynamic_k_nn`, `test_baselines`, the ck848 config
+parity gate and (for the `models/` move) a CPU `--profile dknn --smoke`.

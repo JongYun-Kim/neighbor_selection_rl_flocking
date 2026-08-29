@@ -84,21 +84,20 @@ and `legacy/` still hardcode `/workspace/...` — keep the repo at `/workspace`
 | path | what |
 |---|---|
 | `envs/env.py` | the entire simulator (`NeighborSelectionFlockingEnv`); serves both action encodings via `action_type` |
-| `models/` | PPO models — `ppo.py` (ego-centric core), `ppo_dynamic_k_nn.py` (Dynamic-k pointer subclass), `ppo_centralized.py` (centralized-obs variant, dormant) |
+| `models/` | the two live policy models — `ppo.py` (ego-centric core, binary edge-selection head) and `ppo_dynamic_k_nn.py` (Dynamic-k cutoff-pointer subclass); dormant variants are under `legacy/` |
 | `dynamic_k_nn.py` | identifiers for the Dynamic-k method (action type/encoding, model id, experiment names) |
 | `train_unified.py` | **the trainer** — all three profiles (see below) |
-| `eval/` | **criterion-of-record harness** — `eval_c2.py`, `run_knn_refs.py`, `pair_judge.py`, `stats.py`, `common.py` |
+| `eval/` | **criterion-of-record harness** — `eval_c2.py` (protocol, judge, CLI), `policies.py` (checkpoint → policy adapters for both methods), `run_knn_refs.py`, `pair_judge.py`, `stats.py`, `common.py` |
 | `tools/check_ck848_parity.py` | config-equivalence gate: the `dknn` profile vs the archived ck848 `params.json` |
 | `baselines.py` | heuristic baselines + `create_baseline` factory (nine dormant ones re-exported from `legacy/baselines_extra.py`) |
-| `callbacks.py`, `grad_logging_ppo.py` | shared RLlib callbacks / PPO subclass |
-| `evaluate_checkpoint.py` | MC eval harness for centralized-variant checkpoints — **not** the judge for the ego-centric policies |
+| `callbacks.py`, `grad_logging_ppo.py` | shared RLlib callbacks / PPO subclass — pinned at the repo root: RLlib 2.1 pickles the custom policy class by module path into every checkpoint, so moving them would break existing loads |
 | `test_baselines.py` | repo-wide smoke/regression gate — keep it green |
 | `test_dynamic_k_nn.py` | Dynamic-k test suite (action conversion, padding, cross-size strict-load, short PPO rollout, legacy binary regression) — keep it green |
 | `studies/` | research record; per study: `PROBLEM` / `PLAN` / `RUNLOG` / `REPORT_KO`, plus the `src/` that ran it |
 | `figures/` | paper-figure pipeline (`figures/README.md`) |
 | `checkpoints/` | canonical policy copies (binaries untracked; `PROVENANCE.md`) |
 | `docs/` | baseline catalog, heuristic-author guide, `DECISION_LOG.md` |
-| `legacy/` | retired trainers and dormant experiment scripts + frozen era log (`legacy/HANDOFF.md`) |
+| `legacy/` | retired trainers, the retired pre-C2 MC evaluator (`evaluate_checkpoint.py`), dormant model variants (`ppo_centralized.py`, `beta_dist.py`) and dormant experiment scripts + frozen era log (`legacy/HANDOFF.md`). Kept runnable: run from the repo root with `PYTHONPATH=.` |
 
 ## Training — `train_unified.py`
 

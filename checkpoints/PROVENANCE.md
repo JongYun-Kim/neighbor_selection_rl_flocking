@@ -79,5 +79,7 @@ the studies that produced them, not the version to run; earlier studies'
 `obs_position_scale` handling). Results of the confirmation study:
 `studies/acs-confirm/REPORT_KO.md`.
 
-`evaluate_checkpoint.py` is for the centralized-obs model variant and is not the
-judge for these ego-centric policies.
+`legacy/evaluate_checkpoint.py` (retired; it was at the repo root until
+2026-08-29) is the pre-C2 Monte Carlo harness for the centralized-obs model
+variant and is not the judge for these ego-centric policies. Its policy-loading
+half now lives on as `eval/policies.py`.
