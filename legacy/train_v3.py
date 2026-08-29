@@ -7,7 +7,7 @@ from ray.tune.registry import register_env
 
 from envs.env import NeighborSelectionFlockingEnv, Config, load_config
 from models.ppo import NeighborSelectionPPORLlib
-from models.beta_dist import TorchContinuousWeightDist
+from legacy.beta_dist import TorchContinuousWeightDist
 from callbacks import FlockingCallbacks
 from grad_logging_ppo import GradLoggingPPO
 

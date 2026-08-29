@@ -26,7 +26,7 @@ from collections import defaultdict
 from tqdm import tqdm
 
 from envs.env import NeighborSelectionFlockingEnv, load_config
-from models.ppo_centralized import NeighborSelectionPPORLlibCentralized
+from legacy.ppo_centralized import NeighborSelectionPPORLlibCentralized
 from models.ppo import NeighborSelectionPPORLlib
 
 
