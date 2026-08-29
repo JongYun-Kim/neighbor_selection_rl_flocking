@@ -2,10 +2,16 @@
 
 > **Note (2026-08):** this catalog covers the original 8 baselines. Four newer ones —
 > `ActiveSearch`, `GazingPreference`, `MotionSalienceThreshold`, `VisualAttention` —
-> are implemented in `baselines.py` (registered in the `create_baseline` factory) but
-> not yet documented here; see their class docstrings.
+> are implemented (registered in the `create_baseline` factory) but not yet
+> documented here; see their class docstrings.
+>
+> **Where the code lives (2026-08-29):** `baselines.py` (repo root) defines the three
+> heuristics the active code and the studies use — `random`, `distance`, `nearest` —
+> and re-exports the other nine from `legacy/baselines_extra.py`. Nothing about the
+> API changed: every name still imports from `baselines`, and `create_baseline`
+> accepts every type listed here.
 
-This document describes the heuristic baseline neighbor selection strategies implemented in `baselines.py` (repo root) for the flocking environment.
+This document describes the heuristic baseline neighbor selection strategies of `baselines.py` (repo root) for the flocking environment.
 
 ## Overview
 
