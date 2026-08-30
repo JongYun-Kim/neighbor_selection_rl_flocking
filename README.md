@@ -292,7 +292,6 @@ Tests inside the image:
 ```bash
 docker run --rm --init --shm-size 4g \
   --workdir /workspace/source \
-  --env START_SSHD=0 \
   --mount type=bind,src="$(pwd)",dst=/workspace/source,readonly \
   uom-neighbor-selection \
   python -m unittest -v test_dynamic_k_nn

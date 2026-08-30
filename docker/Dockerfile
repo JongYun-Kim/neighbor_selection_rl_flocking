@@ -18,11 +18,7 @@ RUN sed -i -E 's#http://(archive|security)\.ubuntu\.com/ubuntu#https://\1.ubuntu
     sudo nano x11-apps \
     iproute2 iputils-ping net-tools dnsutils \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 ffmpeg \
-    openssh-server \
- && mkdir -p /var/run/sshd \
  && rm -rf /var/lib/apt/lists/*
-
-EXPOSE 22
 
 # python
 RUN add-apt-repository ppa:deadsnakes/ppa -y \
@@ -130,19 +126,11 @@ ARG GID=1000
 
 RUN groupadd -g ${GID} flocking || true \
  && useradd -m -s /bin/bash -u ${UID} -g flocking flocking \
+ # The password is only for `sudo` inside the container; there is no daemon
+ # left to log into.
  && echo 'flocking:neighbor' | chpasswd \
- && mkdir -p /home/flocking/.ssh \
- && chown -R flocking:flocking /home/flocking/.ssh \
- && chmod 700 /home/flocking/.ssh \
  && echo "flocking ALL=(ALL) ALL" > /etc/sudoers.d/flocking \
  && chmod 0440 /etc/sudoers.d/flocking
-# 필요하면 여기서 authorized_keys도 미리 심을 수 있음:
-# && touch /home/flocking/.ssh/authorized_keys \
-# && chown flocking:flocking /home/flocking/.ssh/authorized_keys \
-# && chmod 600 /home/flocking/.ssh/authorized_keys
-
-RUN sed -ri 's/^#?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config \
- && sed -ri 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
 RUN mkdir -p /workspace && chown -R ${UID}:${GID} /workspace
 WORKDIR /workspace
@@ -150,7 +138,10 @@ WORKDIR /workspace
 # get entrypoint file
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-# USER flocking -- included in the entrypoint!!
+# Default user of the image. `docker exec` and `docker run` take the user from
+# this Config.User; the entrypoint's runtime `sudo -u flocking` switch never
+# applied to exec sessions, which is why they used to land on root.
+USER flocking
 
 # set cuda params
 ENV NVIDIA_VISIBLE_DEVICES=all \

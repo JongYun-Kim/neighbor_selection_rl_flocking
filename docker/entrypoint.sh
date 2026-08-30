@@ -1,21 +1,16 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-if [ "${START_SSHD:-1}" = "1" ]; then
-    # Keep the legacy interactive/SSH workflow available. Host-driven training
-    # disables this daemon because the training process is the container job.
-    [ -d /var/run/sshd ] || mkdir -p /var/run/sshd
-    echo "[entrypoint] starting sshd..."
-    /usr/sbin/sshd
-else
-    echo "[entrypoint] sshd disabled"
-fi
+# The image runs as 'flocking' (Dockerfile `USER`), so this script only reports
+# the environment on an interactive entry and hands every other invocation
+# straight to the requested command. No privilege switching, no daemons.
 
 # Just to check versions and stuffs at the entry
 run_checks_and_shell() {
-    echo "[entrypoint] running Python/CUDA checks as 'flocking'"
+    echo "[entrypoint] running Python/CUDA checks as '$(id -un)'"
 
-    sudo -H -u flocking bash -lc 'python - << "PY"
+    # A broken import must not cost you the shell you need to debug it.
+    python - << "PY" || echo "[entrypoint] WARNING: environment check failed" >&2
 import torch, torchvision, torchaudio, ray, gym, numpy as np
 import sys
 
@@ -40,25 +35,23 @@ if cuda_available:
     print("current device index:", torch.cuda.current_device())
 else:
     print("No CUDA device visible to PyTorch.")
-PY'
+PY
 
-    echo "[entrypoint] dropping into bash as 'flocking'"
-    exec sudo -H -u flocking bash
+    echo "[entrypoint] dropping into bash as '$(id -un)'"
+    exec bash
 }
 
 
 # How it actually starts
 if [ $# -eq 0 ]; then
-    # no args → checks + flocking bash
+    # no args → checks + interactive bash
     run_checks_and_shell
 elif [ $# -eq 1 ] && [ "$1" = "bash" ]; then
-    # single arg "bash" → also checks + flocking bash
+    # single arg "bash" → also checks + interactive bash
     run_checks_and_shell
 else
-    # any other command → run as flocking
-    echo "[entrypoint] executing as 'flocking': $*"
-    # Preserve explicit Docker workflow metadata and runtime controls across
-    # the root -> flocking user transition. Secrets are file-mounted rather
-    # than placed in this environment.
-    exec sudo -H -E -u flocking -- "$@"
+    # any other command (the training service, tests, one-off scripts) runs
+    # verbatim as the container user.
+    echo "[entrypoint] executing as '$(id -un)': $*"
+    exec "$@"
 fi

@@ -176,7 +176,6 @@ start_training() {
         --workdir /workspace/source
         --label "dynamic-k-nn.run-id=${run_id}"
         --label "dynamic-k-nn.results-dir=${run_results}"
-        --env START_SSHD=0
         --env "WORKFLOW_RUN_ID=${run_id}"
         --env TRAINING_RESULTS_DIR=/workspace/test_results
         --env "WANDB_ENABLED=${normalized_wandb}"
