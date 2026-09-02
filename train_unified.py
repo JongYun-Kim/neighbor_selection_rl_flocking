@@ -71,7 +71,7 @@ _ap.add_argument("--seeds", default=os.environ.get("FLOCK_SEEDS", "42"),
 _ap.add_argument("--gpu", default=os.environ.get("FLOCK_GPU"),
                  help="CUDA_VISIBLE_DEVICES value (e.g. '1' or '1,3'). Unset: "
                       "leave device visibility untouched (container-friendly).")
-_ap.add_argument("--steps", type=int, default=None,
+_ap.add_argument("--steps", type=int, default=os.environ.get("FLOCK_STEPS"),
                  help="stop at this many env steps (default: profile budget)")
 _ap.add_argument("--iters", type=int, default=None,
                  help="ALSO stop at this training iteration (pi_r default: "
@@ -87,7 +87,7 @@ _ap.add_argument("--dry-run", action="store_true",
                       "(feeds tools/check_ck848_parity.py)")
 # --- D2 probe axes (dknn_c2 tuning) + general knobs; None = profile default ---
 _ap.add_argument("--lr", type=float, default=None)
-_ap.add_argument("--lr-end", type=float, default=None,
+_ap.add_argument("--lr-end", type=float, default=os.environ.get("FLOCK_LR_END"),
                  help="linear lr endpoint at --steps (omit: flat/profile schedule)")
 _ap.add_argument("--grad-clip", type=float, default=None)
 _ap.add_argument("--entropy-coeff", type=float, default=None)
@@ -95,8 +95,8 @@ _ap.add_argument("--clip-param", type=float, default=None)
 _ap.add_argument("--entropy-penalty", type=float, default=None,
                  help="dknn only: pointer-entropy penalty coef applied in "
                       "custom_loss (RLlib forbids entropy_coeff < 0)")
-_ap.add_argument("--minibatch", type=int, default=None)
-_ap.add_argument("--sgd-iter", type=int, default=None)
+_ap.add_argument("--minibatch", type=int, default=os.environ.get("FLOCK_MINIBATCH"))
+_ap.add_argument("--sgd-iter", type=int, default=os.environ.get("FLOCK_SGD_ITER"))
 _ap.add_argument("--workers", type=int, default=None)
 _ap.add_argument("--envs-per-worker", type=int, default=None)
 _ap.add_argument("--fragment", type=int, default=None)
@@ -106,7 +106,8 @@ _ap.add_argument("--cap", type=int, default=None,
 _ap.add_argument("--eval-cap", type=int, default=6000,
                  help="eval env max_time_steps; 6000 is the C2 protocol cap, "
                       "lower it only for smoke tests and gates")
-_ap.add_argument("--eval-interval", type=int, default=16,
+_ap.add_argument("--eval-interval", type=int,
+                 default=os.environ.get("FLOCK_EVAL_INTERVAL", "16"),
                  help="iterations between eval rounds (0 = no in-training eval)")
 _ap.add_argument("--num-gpus", type=int, default=1,
                  help="RLlib num_gpus for the learner (forced to 0 by --smoke). "

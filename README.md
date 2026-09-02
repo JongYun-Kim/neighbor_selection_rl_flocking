@@ -224,6 +224,19 @@ The copies under `studies/*/src/` are the **records** of the studies that
 produced them — kept unmodified, not the version to run. `eval/` reproduces the
 acs-confirm lane exactly (verified seed-by-seed at promotion time).
 
+For the canonical `main_c2_v1` contract, top-5+final checkpoint funnel,
+dev/confirmation lanes, full N=10/20/40 population recording, artifact
+validation, and ranked-radius/heatmap/control-effort analysis, see
+[`docs/EVALUATION.md`](docs/EVALUATION.md). New workflows can use the unified
+CLI (`python -m eval checkpoints|c2|population|validate|radii|heatmaps|control-effort`)
+directly or the foreground one-shot Docker wrapper:
+
+```bash
+CHECKPOINT_ROOT=/absolute/checkpoint/root \
+ARTIFACT_ROOT=/absolute/artifact/root \
+./docker/run_eval.sh --dry-run population --help
+```
+
 Extending:
 
 - Adding a heuristic baseline: `docs/FOR_HEURISTIC_DEVELOPERS.md`, then

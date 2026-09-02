@@ -31,7 +31,7 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 import numpy as np
 
 from utils.paths import repo_path
-from eval.eval_c2 import t_fire_c2  # same offline judge as the policy evals
+from eval.protocol import judge_episode_c2
 
 DEFAULT_OUTDIR = repo_path("test_results", "knnref")
 
@@ -53,11 +53,10 @@ def judge_npz(path):
     import json
     z = np.load(path, allow_pickle=True)
     m = json.loads(str(z["meta"]))
-    t = t_fire_c2(z["phi"], z["s_ent"], z["n_comp_r0"])
-    r = z["reward"]
-    J = float(-np.nansum(r[1:t + 1])) if t >= 0 else np.nan
+    judgment = judge_episode_c2(
+        z["phi"], z["s_ent"], z["n_comp_r0"], z["reward"])
     return dict(k=m["k"], L=m["initial_position_bound"], n_agents=m["n_agents"],
-                seed=m["seed"], t_fire=t, success=int(t >= 0), J=J)
+                seed=m["seed"], **judgment)
 
 
 def main():

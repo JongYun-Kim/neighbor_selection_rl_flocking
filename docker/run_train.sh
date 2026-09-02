@@ -30,7 +30,8 @@ Commands:
 
 Recipe (train_unified.py):
   FLOCK_PROFILE (dknn | pi_r | dknn_c2; default dknn), FLOCK_SEEDS,
-  FLOCK_GPU, FLOCK_RESUME (default 1)
+  FLOCK_GPU, FLOCK_RESUME (default 1), FLOCK_STEPS, FLOCK_MINIBATCH,
+  FLOCK_SGD_ITER, FLOCK_LR_END, FLOCK_EVAL_INTERVAL
 
 Environment overrides:
   IMAGE_NAME, CONTAINER_NAME, RESULTS_ROOT, WANDB_ENABLED (default false),
@@ -179,6 +180,10 @@ start_training() {
         --env "WORKFLOW_RUN_ID=${run_id}"
         --env TRAINING_RESULTS_DIR=/workspace/test_results
         --env "WANDB_ENABLED=${normalized_wandb}"
+        # Compatibility with cached pre-main images. The current image has no
+        # sshd path, while the older image used by the W&B reference run starts
+        # it unless this flag is explicit.
+        --env START_SSHD=0
         --mount "type=bind,src=${repo_root},dst=/workspace/source,readonly"
         --mount "type=bind,src=${run_results},dst=/workspace/test_results"
     )
@@ -195,6 +200,8 @@ start_training() {
     # asked for. The rest are the env-var knobs of the retired TRAIN_ENTRY.
     local override_names=(
         FLOCK_PROFILE FLOCK_SEEDS FLOCK_GPU FLOCK_RESUME
+        FLOCK_STEPS FLOCK_MINIBATCH FLOCK_SGD_ITER FLOCK_LR_END
+        FLOCK_EVAL_INTERVAL
         BASE_ENV_SEED TRAINING_SWARM_SIZE NUM_ROLLOUT_WORKERS
         NUM_ENVS_PER_WORKER ROLLOUT_FRAGMENT_LENGTH TOTAL_TRAINING_TIMESTEPS
         MAX_TRAINING_TIME_S TRAIN_BATCH_SIZE SGD_MINIBATCH_SIZE NUM_SGD_ITER

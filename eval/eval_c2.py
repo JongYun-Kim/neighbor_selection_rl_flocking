@@ -39,11 +39,19 @@ import numpy as np
 
 from eval.policies import (induced_mask_from_obs, is_dknn_params,
                            load_policy)
+from eval.protocol import MAIN_C2_V1, first_fire_c2, judge_episode_c2
 from utils.paths import repo_path
 
 DEFAULT_OUTDIR = repo_path("test_results", "eval")
 
-PHI_GOAL, W_A, W, EPS = 0.98, 50, 300, 0.05
+PHI_GOAL = MAIN_C2_V1.phi_goal
+W_A = MAIN_C2_V1.alignment_window
+W = MAIN_C2_V1.stability_window
+EPS = MAIN_C2_V1.spatial_band_epsilon
+
+# Public compatibility alias: historical study tools import this symbol from
+# eval.eval_c2, while the sole implementation now lives in eval.protocol.
+t_fire_c2 = first_fire_c2
 
 
 # ---------------------------------------------------------------- forensics
@@ -90,26 +98,13 @@ class ForensicsWrapper:
 
 
 # ---------------------------------------------------------------- C2 judge
-def t_fire_c2(phi, s, comp):
-    import pandas as pd
-    pphi, ps, pcomp = pd.Series(phi), pd.Series(s), pd.Series(comp)
-    align = (pphi.rolling(W_A).min() > PHI_GOAL).values
-    coh = (pcomp.rolling(W).max() == 1).values
-    band = ((ps.rolling(W).max() - ps.rolling(W).min()) / ps.rolling(W).mean()).values
-    with np.errstate(invalid="ignore"):
-        ok = align & coh & (band < EPS)
-    hit = np.flatnonzero(ok)
-    return int(hit[0]) if hit.size else -1
-
-
 def judge_npz(path):
     z = np.load(path, allow_pickle=True)
     m = json.loads(str(z["meta"]))
-    t = t_fire_c2(z["phi"], z["s_ent"], z["n_comp_r0"])
-    r = z["reward"]
-    J = float(-np.nansum(r[1:t + 1])) if t >= 0 else np.nan
+    judgment = judge_episode_c2(
+        z["phi"], z["s_ent"], z["n_comp_r0"], z["reward"])
     rd = z["rank_dev"] if "rank_dev" in z.files else None
-    out = dict(seed=m["seed"], t_fire=t, success=int(t >= 0), J=J,
+    out = dict(seed=m["seed"], **judgment,
                phi_ss=float(np.nanmedian(z["phi"][-300:])),
                sigma_p_ss=float(np.nanmedian(z["s_ent"][-300:])),
                min_pair=float(np.nanmin(z["min_pair"])),
@@ -169,7 +164,8 @@ def run_one(args):
     with np.load(out, allow_pickle=True) as z:
         data = {k: z[k] for k in z.files}
     data["deg_agents"] = deg
-    np.savez_compressed(out, **data)
+    from eval.artifacts import atomic_save_npz
+    atomic_save_npz(out, data)
     return out
 
 

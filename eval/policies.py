@@ -15,6 +15,8 @@ judge, the rollout driver and the CLI.
 """
 import json
 import os
+import pickle
+from pathlib import Path
 
 import numpy as np
 
@@ -154,3 +156,143 @@ def load_policy(checkpoint_path, env):
         mc = params["model"]["custom_model_config"]
         return DknnC2Policy(checkpoint_path, env, mc)
     return C2Policy(checkpoint_path, env)
+
+
+# ------------------------------------------------------ full-population adapter
+def resolve_dynamic_checkpoint(path):
+    """Resolve a Tune checkpoint or a historical evaluation archive.
+
+    Returns a dictionary containing a canonical checkpoint directory, model
+    config, observation scale, and enough information to load the state.  The
+    historical ``weights/best_01`` bundles deliberately do not contain
+    ``params.json``; their ``metadata.json`` is the authoritative substitute.
+    """
+    given = Path(path).expanduser().resolve()
+    if (given.is_dir() and (given / "metadata.json").is_file()
+            and (given / "model_state_dict.pt").is_file()):
+        archive_root, checkpoint = given, given / "checkpoint"
+    elif given.is_dir() and (given / "checkpoint").is_dir():
+        archive_root, checkpoint = given, given / "checkpoint"
+    else:
+        checkpoint = given
+        archive_root = checkpoint.parent
+
+    params_path = checkpoint.parent / "params.json"
+    policy_state = checkpoint / "policies" / "default_policy" / "policy_state.pkl"
+    if checkpoint.is_dir() and params_path.is_file() and policy_state.is_file():
+        with params_path.open(encoding="utf-8") as stream:
+            params = json.load(stream)
+        if not is_dknn_params(params):
+            raise ValueError(f"not a Dynamic-k NN checkpoint: {checkpoint}")
+        env_cfg = params.get("env_config", {}).get("config", {}).get("env", {})
+        return {
+            "checkpoint": checkpoint,
+            "archive_root": checkpoint.parent,
+            "kind": "rllib",
+            "model_config": params["model"]["custom_model_config"],
+            "obs_position_scale": env_cfg.get("obs_position_scale", "legacy"),
+            "params": params,
+            "config_file": params_path,
+            "policy_state": policy_state,
+        }
+
+    metadata_path = archive_root / "metadata.json"
+    state_path = archive_root / "model_state_dict.pt"
+    if metadata_path.is_file() and state_path.is_file() and checkpoint.exists():
+        with metadata_path.open(encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        env_cfg = metadata.get("training_env_config", {}).get("env", {})
+        return {
+            "checkpoint": checkpoint,
+            "archive_root": archive_root,
+            "kind": "state_dict_archive",
+            "model_config": metadata["model_config"],
+            "obs_position_scale": env_cfg.get("obs_position_scale", "legacy"),
+            "metadata": metadata,
+            "config_file": metadata_path,
+            "state_dict": state_path,
+        }
+
+    raise FileNotFoundError(
+        "checkpoint needs parent params.json + policy_state.pkl, or an archive "
+        f"with metadata.json + model_state_dict.pt: {given}"
+    )
+
+
+class DynamicKNNInferencePolicy:
+    """Strict-load Dynamic-k policy supporting argmax and categorical sampling."""
+
+    def __init__(self, checkpoint_path, env, device="cpu"):
+        import torch
+        from models.ppo_dynamic_k_nn import DynamicKNNPPORLlib
+
+        self.torch = torch
+        self.device = torch.device(device)
+        self.source = resolve_dynamic_checkpoint(checkpoint_path)
+        n_agents = env.num_agents_max
+        self.model = DynamicKNNPPORLlib(
+            obs_space=env.observation_space,
+            action_space=env.action_space,
+            num_outputs=n_agents * n_agents,
+            model_config={"custom_model_config": self.source["model_config"]},
+            name="population_eval_policy",
+        )
+        if self.source["kind"] == "rllib":
+            with self.source["policy_state"].open("rb") as stream:
+                state = pickle.load(stream)
+            weights = {
+                key: torch.from_numpy(value) if isinstance(value, np.ndarray) else value
+                for key, value in state["weights"].items()
+            }
+        else:
+            weights = torch.load(str(self.source["state_dict"]), map_location="cpu")
+        self.model.load_state_dict(weights, strict=True)
+        self.model.to(self.device)
+        self.model.eval()
+        self.n_agents = int(n_agents)
+
+    def logits(self, observations):
+        """Return ``(B,N,N)`` pointer logits for a list of env observations."""
+        torch = self.torch
+        if isinstance(observations, dict):
+            observations = [observations]
+        tensors = {}
+        for key in ("local_agent_infos", "neighbor_masks", "padding_mask",
+                    "is_from_my_env"):
+            values = np.stack([np.asarray(obs[key]) for obs in observations], axis=0)
+            tensor = torch.as_tensor(values)
+            if key in ("local_agent_infos", "neighbor_masks", "padding_mask"):
+                tensor = tensor.float()
+            tensors[key] = tensor.to(self.device)
+        with torch.no_grad():
+            flat, _ = self.model.forward({"obs": tensors}, state=[], seq_lens=None)
+        return flat.reshape(len(observations), self.n_agents, self.n_agents)
+
+    def actions(self, observations, mode="deterministic", generators=None):
+        torch = self.torch
+        logits = self.logits(observations)
+        if mode == "deterministic":
+            actions = torch.argmax(logits, dim=-1)
+        elif mode == "stochastic":
+            if generators is None or len(generators) != logits.shape[0]:
+                raise ValueError("stochastic inference needs one generator per episode")
+            probs = torch.softmax(logits, dim=-1)
+            actions = torch.stack([
+                torch.multinomial(probs[index], 1, replacement=True,
+                                  generator=generators[index]).squeeze(-1)
+                for index in range(logits.shape[0])
+            ])
+        else:
+            raise ValueError(f"unsupported learned action mode: {mode}")
+        return actions.detach().cpu().numpy().astype(np.int64, copy=False)
+
+    def make_generator(self, seed):
+        torch = self.torch
+        try:
+            generator = torch.Generator(device=self.device)
+        except TypeError:
+            if self.device.type != "cpu":
+                raise RuntimeError("this Torch version lacks a CUDA Generator")
+            generator = torch.Generator()
+        generator.manual_seed(int(seed))
+        return generator

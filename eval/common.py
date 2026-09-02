@@ -216,6 +216,10 @@ def rollout(policy, cfg, seed, pos_stride=10, extra_meta=None):
 
 
 def save_run(path, rec, pos_snaps, snap_ts, meta):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez_compressed(path, pos_snaps=pos_snaps, snap_ts=snap_ts,
-                        meta=json.dumps(meta), **rec)
+    from eval.artifacts import atomic_save_npz
+    atomic_save_npz(path, {
+        "pos_snaps": pos_snaps,
+        "snap_ts": snap_ts,
+        "meta": np.asarray(json.dumps(meta)),
+        **rec,
+    })

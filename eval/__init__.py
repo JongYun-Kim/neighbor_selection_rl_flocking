@@ -10,7 +10,7 @@ collides — is what ``eval.`` resolves to:
 
 The C2 protocol these tools implement: fixed-horizon rollouts capped at 6000
 steps, deterministic (argmax) actions, L = 250 unless --bound says otherwise,
-convergence judged offline (phi >= 0.98 held over 50 steps, one r0-component
+convergence judged offline (phi > 0.98 held over 50 steps, one r0-component
 over 300 steps, spatial-entropy band < 5%), J = accumulated control cost up to
 the firing step.
 
