@@ -141,16 +141,17 @@ python tools/check_ck848_parity.py --config /tmp/cfg.json --ref <path>/params.js
 | `models/` | the two live policy models — `ppo.py` (ego-centric core, binary edge-selection head) and `ppo_dynamic_k_nn.py` (Dynamic-k cutoff-pointer subclass); dormant variants are under `legacy/` |
 | `dynamic_k_nn.py` | identifiers for the Dynamic-k method (action type/encoding, model id, experiment names) |
 | `train_unified.py` | **the trainer** — all three profiles (see below) |
-| `eval/` | **criterion-of-record harness** — `eval_c2.py` (protocol, judge, CLI), `policies.py` (checkpoint → policy adapters for both methods), `run_knn_refs.py`, `pair_judge.py`, `stats.py`, `common.py` |
+| `eval/` | **criterion-of-record and analysis harness** — the unified `python -m eval` CLI covers checkpoint selection, staged C2, population recording, validation, and radius/heatmap/control-effort analysis; the older per-module CLIs remain available for reproduction |
 | `tools/check_ck848_parity.py` | config-equivalence gate: the `dknn` profile vs the archived ck848 `params.json` |
 | `baselines.py` | heuristic baselines + `create_baseline` factory (nine dormant ones re-exported from `legacy/baselines_extra.py`) |
 | `callbacks.py`, `grad_logging_ppo.py` | shared RLlib callbacks / PPO subclass — pinned at the repo root: RLlib 2.1 pickles the custom policy class by module path into every checkpoint, so moving them would break existing loads |
-| `test_baselines.py` | repo-wide smoke/regression gate — keep it green |
+| `test_baselines.py` | heuristic-baseline smoke/regression gate — keep it green |
 | `test_dynamic_k_nn.py` | Dynamic-k test suite (action conversion, padding, cross-size strict-load, short PPO rollout, legacy binary regression) — keep it green |
+| `test_c2_suite.py`, `test_checkpoint_selection.py`, `test_control_effort.py`, `test_eval_*.py` | canonical evaluation workflow regression suites — keep them green |
 | `studies/` | research record; per study: `PROBLEM` / `PLAN` / `RUNLOG` / `REPORT_KO`, plus the `src/` that ran it. `c2-regime-dual-policy/` compared the two methods under one regime and `legacy-ck848/` then corrected its headline — read that pair for why Dynamic-k is the main line |
 | `figures/` | paper-figure pipeline (`figures/README.md`) |
 | `checkpoints/` | canonical policy copies (binaries untracked; `PROVENANCE.md`) |
-| `docs/` | baseline catalog, heuristic-author guide, `DECISION_LOG.md` |
+| `docs/` | evaluation workflow (`EVALUATION.md`), baseline catalog, heuristic-author guide, `DECISION_LOG.md` |
 | `legacy/` | retired trainers, the retired pre-C2 MC evaluator (`evaluate_checkpoint.py`), dormant model variants (`ppo_centralized.py`, `beta_dist.py`) and dormant experiment scripts + frozen era log (`legacy/HANDOFF.md`). Kept runnable: run from the repo root with `PYTHONPATH=.` |
 
 ## Training — `train_unified.py`
@@ -185,7 +186,9 @@ python train_unified.py --profile dknn --dry-run | python tools/check_ck848_pari
   (`--eval-interval`, `0` = off), c2 termination, L=250, cap 6000
   (`--eval-cap`), on dedicated workers running parallel to training. It is a
   monitoring signal — checkpoint selection is decided offline by `eval/`.
-  `--cap` applies to the training env only.
+  `--cap` applies to the training env only. With evaluation disabled,
+  `progress.csv` has no C2 columns for `python -m eval checkpoints` to rank;
+  direct `--checkpoint` evaluation remains available.
 - **Checkpoints.** Every 8 iterations, all kept, plus one at the end (848 = 8 ×
   106, so a reproduction run lands on the grid ck848 came from). ~11 MB each,
   under gitignored `test_results/`.
@@ -214,8 +217,10 @@ python -m eval.pair_judge --seeds 1500-1999 \
     --arm pol=lp848 --arm k12=knnref:12,250,20
 ```
 
-Output goes to the gitignored `test_results/{eval,knnref}/`; `--outdir` /
-`--base` point the tools at another directory (e.g. a study's archived lane).
+The legacy per-module commands above write to the gitignored
+`test_results/{eval,knnref}/`; `--outdir` / `--base` point them at another
+directory (e.g. a study's archived lane). The unified CLI described below
+instead defaults to versioned bundles under `test_results/evaluation/<run-id>/`.
 Method dispatch is automatic: the checkpoint's `params.json` decides between the
 pointer and binary policies, and both the pre- and post-rename Dynamic-k
 identifiers are accepted.
@@ -242,6 +247,8 @@ Extending:
 - Adding a heuristic baseline: `docs/FOR_HEURISTIC_DEVELOPERS.md`, then
   `python test_baselines.py`.
 - Dynamic-k test suite: `python -m unittest -v test_dynamic_k_nn`.
+- All maintained regression suites, including the seven evaluation modules:
+  `python -m unittest -v`.
 
 ## W&B logging (optional)
 
@@ -288,9 +295,14 @@ CONTAINER_NAME=pir-seed7 \
 ./docker/run_train.sh start --run-id pir-n20-seed7
 ```
 
-The recipe is selected by `FLOCK_PROFILE` / `FLOCK_SEEDS` / `FLOCK_GPU`, which
-`run_train.sh` forwards into the container; `start` echoes the resolved
-`profile=… seeds=… gpus=… wandb=…` line, so check it against what you asked for.
+The profile, seeds and device are selected by `FLOCK_PROFILE` / `FLOCK_SEEDS` /
+`FLOCK_GPU`, which `run_train.sh` forwards into the container. Exact-recipe
+overrides are forwarded too: `FLOCK_STEPS`, `FLOCK_MINIBATCH`,
+`FLOCK_SGD_ITER`, `FLOCK_LR_END`, and `FLOCK_EVAL_INTERVAL` map respectively to
+`--steps`, `--minibatch`, `--sgd-iter`, `--lr-end`, and `--eval-interval`;
+leaving them unset preserves the selected profile's defaults. `start` echoes
+the resolved `profile=… seeds=… gpus=… wandb=…` line, so check it against what
+you asked for.
 **W&B is off by default here too** (same opt-in policy as `train_unified.py`);
 `WANDB_ENABLED=1` turns it on and then a mode-600 key file at
 `WANDB_API_KEY_FILE_HOST` is required or `start` refuses.
@@ -307,5 +319,5 @@ docker run --rm --init --shm-size 4g \
   --workdir /workspace/source \
   --mount type=bind,src="$(pwd)",dst=/workspace/source,readonly \
   uom-neighbor-selection \
-  python -m unittest -v test_dynamic_k_nn
+  python -m unittest -v
 ```
