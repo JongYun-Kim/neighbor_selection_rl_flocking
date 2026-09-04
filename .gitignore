@@ -56,9 +56,7 @@ ray_results/
 test_results/
 evaluate_results/
 
-# Canonical checkpoint copies — binaries untracked for now (see checkpoints/PROVENANCE.md)
-checkpoints/*
-!checkpoints/PROVENANCE.md
+# Canonical checkpoint copies under checkpoints/ are intentionally versioned.
 
 # Local-only docs (untracked by choice)
 CLAUDE.md

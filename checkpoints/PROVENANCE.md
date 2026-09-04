@@ -1,10 +1,30 @@
 # Canonical checkpoints — provenance
 
-Copies of the three policies of record (2026-08 line), mirrored from `test_results/`
-with the same relative layout so eval tooling (which reads `params.json` from the
-checkpoint's parent directory) works unchanged. The checkpoint binaries are **not
-git-tracked** (only this file is); on a fresh clone this directory is empty — copy
-from the machine that has `test_results/`, or reproduce with the commands below.
+Canonical checkpoint packages live here with the same load contract as Tune
+trials: `params.json` is the sibling of the RLlib checkpoint directory. Unlike
+the regenerable `test_results/` tree, files under `checkpoints/` are intentionally
+version-controlled so a fresh clone can load the recorded policy directly.
+
+## Dynamic-k NN training-curve checkpoint (2026-09-01 run)
+
+`dynamic_k_nn_best/checkpoint_000592` is the best **saved** checkpoint by
+`episode_reward_mean` in the completed 6M-step `main-dknn-wandb-ref-s42-mb512-e7-6m-20260901`
+run. Its score is -64.85467598696692 at iteration 592 / 4,849,664 timesteps.
+Iterations 594–595 reached a slightly higher curve value (-64.69183846712471),
+but no checkpoint was written at those iterations, so checkpoint 592 is the
+loadable training-curve winner. This designation is not a C2 confirmation result.
+
+The package contains the complete RLlib checkpoint, its sibling `params.json`,
+the original `params.pkl`, selection metadata, and SHA-256 checksums. Load it via:
+
+```bash
+python -m eval population \
+  --checkpoint checkpoints/dynamic_k_nn_best/checkpoint_000592 \
+  --run-id <run-id> --output-root test_results/evaluation
+```
+
+The historical entries below document earlier policy handoffs. Their binaries
+must be copied from the source machine when they are not present in a checkout.
 
 Unpack a handed-over archive at exactly the paths in the tables below: the layout
 *is* the contract, because every tool finds `params.json` by walking up from the

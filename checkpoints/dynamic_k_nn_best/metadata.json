@@ -1,0 +1,12 @@
+{
+  "checkpoint": "checkpoint_000592",
+  "checkpoint_tree_sha256": "8396280cfed201cba1d23e0a9aae32d2b0225c97a440ae2220280f907ac7fefd",
+  "episode_reward_mean": -64.85467598696692,
+  "iteration": 592,
+  "selection_basis": "maximum finite episode_reward_mean among the 92 checkpoint iterations present in the completed trial",
+  "selection_scope": "training curve only; not a C2 confirmation result",
+  "source_trial": "test_results/main-dknn-wandb-ref-s42-mb512-e7-6m-20260901/uni_dknn_s42/GradLoggingPPO_neighbor_selection_flocking_env_ee622_00000_0_2026-09-01_07-29-56",
+  "timesteps_total": 4849664,
+  "training_completed_iterations": 733,
+  "training_completed_timesteps": 6004736
+}
