@@ -4,9 +4,10 @@ Run every tool as a module from the repo root, so that this package — not the
 builtin ``eval()`` name, which lives in a different namespace and never
 collides — is what ``eval.`` resolves to:
 
-    python -m eval.eval_c2      --ckpt <ckpt> --label <label> [--seeds A-B]
+    python -m eval.eval_c2      [--ckpt <ckpt>] [--label <label>] [--seeds A-B]
     python -m eval.run_knn_refs --k 12 --L 250 [--seeds A-B]
     python -m eval.pair_judge   --arm pol=<label> --arm k12=knnref:12,250,20
+    python -m eval sensitivity run --config eval/sensitivity/configs/oat.yaml
 
 The C2 protocol these tools implement: fixed-horizon rollouts capped at 6000
 steps, deterministic (argmax) actions, L = 250 unless --bound says otherwise,
@@ -16,4 +17,8 @@ the firing step.
 
 The copies under studies/*/src are the records of the studies that produced
 them and are kept unmodified; this package is the version to run.
+
+Checkpoint-based commands default to
+``checkpoints/dynamic_k_nn_best/checkpoint_000592``. An explicit
+``--checkpoint``/``--ckpt`` still overrides that selection.
 """

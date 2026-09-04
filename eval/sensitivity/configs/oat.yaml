@@ -1,0 +1,24 @@
+schema_version: dynamic-k-nn-sensitivity-v1
+suite: oat
+
+baseline:
+  num_agents: 20
+  speed: 15.0
+  minimum_turn_radius: 28.125
+  interaction_radius: 60.0
+  acs_lambda: 5.0
+  acs_sigma: 1.0
+  initial_position_bound: 250.0
+
+evaluation:
+  policies: [learned_deterministic, learned_stochastic, pure_acs]
+  seeds: {start: 0, stop: 99}
+  macro_steps: 6000
+  policy_interval_seconds: 0.1
+
+factors:
+  num_agents: [10, 20, 40, 80]
+  minimum_turn_radius: [14.0625, 21.09375, 28.125, 42.1875, 56.25]
+  interaction_radius: [30.0, 45.0, 60.0, 90.0, 120.0]
+  acs_gain_multiplier: [0.5, 0.75, 1.0, 1.5, 2.0]
+  initial_position_bound: [125.0, 187.5, 250.0, 375.0, 500.0]

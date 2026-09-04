@@ -9,6 +9,7 @@ import re
 import sys
 from pathlib import Path
 
+from eval.defaults import DEFAULT_CHECKPOINT
 from utils.paths import repo_path
 
 
@@ -19,6 +20,7 @@ DEFAULT_DEVICE = os.environ.get("DEVICE", "cpu").strip().lower()
 if DEFAULT_DEVICE == "gpu":
     DEFAULT_DEVICE = "cuda"
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+DEVICE_PATTERN = re.compile(r"^(?:cpu|cuda(?::[0-9]+)?)$")
 
 
 def _run_id(value):
@@ -26,6 +28,15 @@ def _run_id(value):
         raise argparse.ArgumentTypeError(
             "run ID must contain only letters, digits, dot, underscore, and hyphen"
         )
+    return value
+
+
+def _device(value):
+    value = str(value).strip().lower()
+    if value == "gpu":
+        value = "cuda"
+    if not DEVICE_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("device must be cpu or cuda[:index]")
     return value
 
 
@@ -49,7 +60,8 @@ def _comma_strings(value):
 def _parser():
     parser = argparse.ArgumentParser(
         prog="python -m eval",
-        description="Main-C2 checkpoint, population, validation, and analysis tools",
+        description=("Main-C2 checkpoint, population, sensitivity, validation, "
+                     "and analysis tools"),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -61,9 +73,14 @@ def _parser():
 
     c2 = subparsers.add_parser("c2", help="run the staged C2 dev/confirmation lane")
     c2.add_argument("--lane", choices=("dev", "confirm"), required=True)
-    source = c2.add_mutually_exclusive_group(required=True)
+    source = c2.add_mutually_exclusive_group()
     source.add_argument("--candidates", type=Path)
-    source.add_argument("--checkpoint", type=Path)
+    source.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=DEFAULT_CHECKPOINT,
+        help="checkpoint to evaluate (default: %(default)s)",
+    )
     c2.add_argument("--run-id", required=True, type=_run_id)
     c2.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
     c2.add_argument("--workers", type=int, default=8)
@@ -75,7 +92,12 @@ def _parser():
 
     population = subparsers.add_parser(
         "population", help="N=10/20/40 full-trace policy population evaluation")
-    population.add_argument("--checkpoint", required=True, type=Path)
+    population.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=DEFAULT_CHECKPOINT,
+        help="checkpoint to evaluate (default: %(default)s)",
+    )
     population.add_argument("--run-id", required=True, type=_run_id)
     population.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
     population.add_argument("--num-agents", type=_comma_ints, default=[10, 20, 40])
@@ -84,11 +106,44 @@ def _parser():
     population.add_argument("--bound", type=float, default=250.0)
     population.add_argument("--policies", type=_comma_strings,
                             default=list(("deterministic", "stochastic", "pure_acs")))
-    population.add_argument("--device", default=DEFAULT_DEVICE)
+    population.add_argument("--device", type=_device, default=DEFAULT_DEVICE)
     population.add_argument("--batch-size", type=int)
     population.add_argument("--workers", type=int, default=8)
     population.add_argument("--repair-invalid", action="store_true")
     population.add_argument("--dry-run", action="store_true")
+
+    sensitivity = subparsers.add_parser(
+        "sensitivity", help="configurable OAT and refined sensitivity diagnostics")
+    sensitivity_commands = sensitivity.add_subparsers(
+        dest="sensitivity_command", required=True)
+    sensitivity_run = sensitivity_commands.add_parser(
+        "run", help="run or resume a sensitivity bundle")
+    sensitivity_run.add_argument("--config", required=True, type=Path)
+    sensitivity_run.add_argument(
+        "--checkpoint", type=Path, default=DEFAULT_CHECKPOINT,
+        help="checkpoint to evaluate (default: %(default)s)")
+    sensitivity_run.add_argument("--run-id", required=True, type=_run_id)
+    sensitivity_run.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
+    sensitivity_run.add_argument("--device", type=_device, default=DEFAULT_DEVICE)
+    sensitivity_run.add_argument("--batch-size", type=int)
+    sensitivity_run.add_argument("--workers", type=int, default=8)
+    sensitivity_run.add_argument("--repair-invalid", action="store_true")
+    sensitivity_run.add_argument("--dry-run", action="store_true")
+    sensitivity_run.add_argument("--factors", type=_comma_strings)
+    sensitivity_run.add_argument("--settings", type=_comma_strings)
+    sensitivity_run.add_argument("--policies", type=_comma_strings)
+    sensitivity_run.add_argument("--seeds")
+
+    sensitivity_validate = sensitivity_commands.add_parser(
+        "validate", help="validate sparse sensitivity evidence and summaries")
+    sensitivity_validate.add_argument("--run", required=True, type=Path)
+    sensitivity_validate.add_argument("--write-report", action="store_true")
+    sensitivity_validate.add_argument("--rebuild-summaries", action="store_true")
+
+    sensitivity_plot = sensitivity_commands.add_parser(
+        "plot", help="write the four core sensitivity tables and figures")
+    sensitivity_plot.add_argument("--run", required=True, type=Path)
+    sensitivity_plot.add_argument("--output", type=Path)
 
     validate = subparsers.add_parser("validate", help="validate a population bundle")
     validate.add_argument("--run", required=True, type=Path)
@@ -190,6 +245,51 @@ def main(argv=None):
         print(json.dumps({"bundle": str(bundle), "manifest": manifest}, indent=2,
                          sort_keys=True, allow_nan=False))
         return 0
+
+    if args.command == "sensitivity":
+        if args.sensitivity_command == "run":
+            from eval.run_support import parse_int_range
+            from eval.sensitivity.config import (
+                SensitivityConfigError, load_sensitivity_config)
+            from eval.sensitivity.runner import run_sensitivity
+            if args.device.startswith("cuda") and args.batch_size is None:
+                parser.error("CUDA sensitivity evaluation requires explicit --batch-size")
+            batch_size = 1 if args.batch_size is None else args.batch_size
+            if batch_size <= 0:
+                parser.error("--batch-size must be positive")
+            try:
+                config = load_sensitivity_config(
+                    args.config,
+                    factors=args.factors,
+                    settings=args.settings,
+                    policies=args.policies,
+                    seeds=parse_int_range(args.seeds) if args.seeds else None,
+                )
+            except (SensitivityConfigError, ValueError) as error:
+                parser.error(str(error))
+            bundle = (
+                args.output_root.expanduser().resolve() / args.run_id / "sensitivity")
+            manifest = run_sensitivity(
+                args.checkpoint, bundle, args.run_id, config,
+                device=args.device, batch_size=batch_size, workers=args.workers,
+                repair_invalid=args.repair_invalid, dry_run=args.dry_run)
+            print(json.dumps(
+                {"bundle": str(bundle), "manifest": manifest}, indent=2,
+                sort_keys=True, allow_nan=False))
+            return 0
+        if args.sensitivity_command == "validate":
+            from eval.sensitivity.runner import validate_sensitivity_bundle
+            result = validate_sensitivity_bundle(
+                args.run, write_report=args.write_report,
+                rebuild_summaries=args.rebuild_summaries)
+            print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+            return 0
+        if args.sensitivity_command == "plot":
+            from eval.sensitivity.analysis import write_analysis
+            result = write_analysis(args.run, output_dir=args.output)
+            print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+            return 0
+        raise AssertionError(args.sensitivity_command)
 
     if args.command == "validate":
         from eval.population import validate_bundle

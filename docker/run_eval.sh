@@ -22,8 +22,9 @@ Examples:
       --out /workspace/artifacts/checkpoints.json
   ./docker/run_eval.sh c2 --lane dev \
       --candidates /workspace/artifacts/checkpoints.json --run-id experiment-dev
-  ./docker/run_eval.sh population --checkpoint /workspace/checkpoints/checkpoint_000848 \
-      --run-id population-ck848
+  ./docker/run_eval.sh population --run-id population-best
+  ./docker/run_eval.sh sensitivity run \
+      --config eval/sensitivity/configs/oat.yaml --run-id sensitivity-oat
 
 The first non-runner argument begins the eval command. Consequently, a
 --dry-run before the command previews Docker without running it, while a
@@ -35,14 +36,17 @@ Runner options:
   -h, --help    Show this help.
 
 Common eval commands:
-  checkpoints, c2, population, validate, radii, heatmaps, control-effort
+  checkpoints, c2, population, sensitivity, validate, radii, heatmaps,
+  control-effort
 
 Environment overrides:
   IMAGE_NAME       Docker image (default: uom-neighbor-selection-eval)
   CHECKPOINT_ROOT  Host checkpoint tree, mounted read-only
+                   (default model: dynamic_k_nn_best/checkpoint_000592)
   ARTIFACT_ROOT    Host artifact tree, mounted read-write
   CONTAINER_NAME   Optional container name; otherwise a unique name is made
-  DEVICE           cpu (default) or cuda[:index]
+  DEVICE           cpu (default) or cuda[:index]; CUDA population/sensitivity
+                   commands require an explicit --batch-size
   GPU_REQUEST      Docker --gpus value; setting it explicitly requests a GPU
 EOF
 }
@@ -159,7 +163,9 @@ else
     git_diff_sha256=""
 fi
 
-device="${device,,}"
+trimmed_device="${device#"${device%%[![:space:]]*}"}"
+trimmed_device="${trimmed_device%"${trimmed_device##*[![:space:]]}"}"
+device="${trimmed_device,,}"
 if [[ "${device}" == gpu ]]; then
     device=cuda
 fi
@@ -167,15 +173,25 @@ if [[ "${device}" != cpu && ! "${device}" =~ ^cuda(:[0-9]+)?$ ]]; then
     fail "DEVICE must be cpu or cuda[:index], found: ${DEVICE:-cpu}"
 fi
 
-# An explicit population --device cuda[:index] is also a GPU request. This
-# keeps the common command self-contained while retaining CPU as the default.
+# An explicit evaluation --device cuda[:index] is also a GPU request. This
+# keeps population and sensitivity commands self-contained while retaining CPU
+# as the default.
 eval_requests_gpu=0
 for ((index = 0; index < ${#eval_args[@]}; index++)); do
     argument="${eval_args[index]}"
-    if [[ "${argument}" =~ ^--device=cuda(:[0-9]+)?$ ]]; then
-        eval_requests_gpu=1
-    elif [[ "${argument}" == --device && $((index + 1)) -lt ${#eval_args[@]} \
-            && "${eval_args[index + 1]}" =~ ^cuda(:[0-9]+)?$ ]]; then
+    argument_device=""
+    if [[ "${argument}" == --device=* ]]; then
+        argument_device="${argument#--device=}"
+    elif [[ "${argument}" == --device && $((index + 1)) -lt ${#eval_args[@]} ]]; then
+        argument_device="${eval_args[index + 1]}"
+    fi
+    argument_device="${argument_device#"${argument_device%%[![:space:]]*}"}"
+    argument_device="${argument_device%"${argument_device##*[![:space:]]}"}"
+    argument_device="${argument_device,,}"
+    if [[ "${argument_device}" == gpu ]]; then
+        argument_device=cuda
+    fi
+    if [[ "${argument_device}" =~ ^cuda(:[0-9]+)?$ ]]; then
         eval_requests_gpu=1
     fi
 done

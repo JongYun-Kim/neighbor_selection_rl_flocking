@@ -19,7 +19,6 @@ the original `params.pkl`, selection metadata, and SHA-256 checksums. Load it vi
 
 ```bash
 python -m eval population \
-  --checkpoint checkpoints/dynamic_k_nn_best/checkpoint_000592 \
   --run-id <run-id> --output-root test_results/evaluation
 ```
 

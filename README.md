@@ -205,8 +205,11 @@ The criterion of record is the `eval/` package. Run it **from the repo root**,
 as modules:
 
 ```bash
-# a checkpoint on the confirmation lane
-python -m eval.eval_c2 --ckpt <checkpoint_000848 dir> --label lp848 \
+# canonical training-curve-best checkpoint on the confirmation lane
+python -m eval.eval_c2 \
+    --seeds 1500-1999 --workers 24
+# override the checkpoint and label when evaluating another model
+python -m eval.eval_c2 --ckpt <checkpoint dir> --label <label> \
     --seeds 1500-1999 --workers 24
 # screen a whole run by its in-training eval metrics first
 python -m eval.eval_c2 --rank-runs test_results/<run>/
@@ -223,17 +226,21 @@ directory (e.g. a study's archived lane). The unified CLI described below
 instead defaults to versioned bundles under `test_results/evaluation/<run-id>/`.
 Method dispatch is automatic: the checkpoint's `params.json` decides between the
 pointer and binary policies, and both the pre- and post-rename Dynamic-k
-identifiers are accepted.
+identifiers are accepted. When `--ckpt`/`--checkpoint` is omitted, maintained
+evaluation commands use
+`checkpoints/dynamic_k_nn_best/checkpoint_000592`; an explicit option always
+overrides the default.
 
 The copies under `studies/*/src/` are the **records** of the studies that
 produced them — kept unmodified, not the version to run. `eval/` reproduces the
 acs-confirm lane exactly (verified seed-by-seed at promotion time).
 
 For the canonical `main_c2_v1` contract, top-5+final checkpoint funnel,
-dev/confirmation lanes, full N=10/20/40 population recording, artifact
-validation, and ranked-radius/heatmap/control-effort analysis, see
+dev/confirmation lanes, full N=10/20/40 population recording, configurable
+sensitivity runs, artifact validation, and ranked-radius/heatmap/control-effort
+analysis, see
 [`docs/EVALUATION.md`](docs/EVALUATION.md). New workflows can use the unified
-CLI (`python -m eval checkpoints|c2|population|validate|radii|heatmaps|control-effort`)
+CLI (`python -m eval checkpoints|c2|population|sensitivity|validate|radii|heatmaps|control-effort`)
 directly or the foreground one-shot Docker wrapper:
 
 ```bash

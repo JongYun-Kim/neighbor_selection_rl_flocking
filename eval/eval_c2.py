@@ -7,9 +7,10 @@ rank-deviation and per-agent degree), judges C2 offline, and reports
 success / t_conv / J against the k-NN frontier references.
 
 Usage (always from the repo root, so that `eval` resolves to this package):
-  python -m eval.eval_c2 --ckpt <path/to/checkpoint_0000NN> --label lp848 \
+  python -m eval.eval_c2 \
       [--seeds 1000-1031] [--steps 6000] [--bound 250] [--workers 8] \
       [--outdir <dir>]
+  python -m eval.eval_c2 --ckpt <path/to/checkpoint_0000NN> --label <label>
   python -m eval.eval_c2 --rank-runs <run_dir>   # rank checkpoints by eval metrics
 
 Outputs: <outdir>/<label>/<label>_s<seed>.npz + <outdir>/<label>_summary.csv
@@ -37,6 +38,7 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 
 import numpy as np
 
+from eval.defaults import DEFAULT_CHECKPOINT, DEFAULT_CHECKPOINT_LABEL
 from eval.policies import (induced_mask_from_obs, is_dknn_params,
                            load_policy)
 from eval.protocol import MAIN_C2_V1, first_fire_c2, judge_episode_c2
@@ -201,8 +203,16 @@ def rank_runs(run_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt")
-    ap.add_argument("--label")
+    ap.add_argument(
+        "--ckpt",
+        default=str(DEFAULT_CHECKPOINT),
+        help="checkpoint to evaluate (default: %(default)s)",
+    )
+    ap.add_argument(
+        "--label",
+        default=DEFAULT_CHECKPOINT_LABEL,
+        help="artifact label (default: %(default)s)",
+    )
     ap.add_argument("--seeds", default="1000-1031")
     ap.add_argument("--steps", type=int, default=6000)
     ap.add_argument("--bound", type=float, default=250.0)
@@ -218,7 +228,6 @@ def main():
     if args.rank_runs_dir:
         rank_runs(args.rank_runs_dir)
         return
-    assert args.ckpt and args.label, "--ckpt and --label required"
 
     a, b = args.seeds.split("-")
     seeds = list(range(int(a), int(b) + 1))

@@ -1,0 +1,27 @@
+schema_version: dynamic-k-nn-sensitivity-v1
+suite: refined_near_zero
+
+baseline:
+  num_agents: 20
+  speed: 15.0
+  minimum_turn_radius: 28.125
+  interaction_radius: 60.0
+  acs_lambda: 5.0
+  acs_sigma: 1.0
+  initial_position_bound: 250.0
+
+evaluation:
+  policies: [learned_deterministic, learned_stochastic, pure_acs]
+  seeds: {start: 0, stop: 99}
+  macro_steps: 6000
+  policy_interval_seconds: 0.1
+
+refinement:
+  max_heading_change_per_substep: 0.05333333333333334
+  minimum_turn_radius:
+    - 14.0625
+    - 7.03125
+    - 3.515625
+    - 1.7578125
+    - 0.87890625
+    - 0.477464829275686

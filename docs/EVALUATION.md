@@ -40,8 +40,10 @@ The only official confirmation configuration is:
 
 Changing any of those fields produces a development or diagnostic result, not
 a confirmation result. The `dev` lane defaults to seeds `1000-1031`, uses the
-same protocol, and is explicitly non-official. Confirmation accepts exactly one
-checkpoint chosen after reviewing the dev ranking; promotion is never automatic.
+same protocol, and is explicitly non-official. Checkpoint-based commands default
+to `checkpoints/dynamic_k_nn_best/checkpoint_000592`; pass `--checkpoint` to
+override it. Confirmation still accepts exactly one checkpoint, and never a
+candidate set.
 
 ## Checkpoint funnel
 
@@ -71,14 +73,15 @@ only: checkpoint data is never copied at this stage. Those hashes are
 revalidated before a lane starts, and the confirmation bundle atomically
 archives its one finalist.
 
-Evaluate all candidates on `dev`, review `summaries/ranking.csv`, then pass one
-explicit checkpoint to `confirm`:
+Evaluate all candidates on `dev` and review `summaries/ranking.csv`. The canonical
+training-curve-best checkpoint can then be confirmed without a checkpoint option;
+pass `--checkpoint` when confirming a different selection:
 
 ```bash
 python -m eval c2 --lane dev --candidates test_results/evaluation/candidates.json \
     --run-id model-dev --output-root test_results/evaluation --workers 24
 
-python -m eval c2 --lane confirm --checkpoint <chosen-checkpoint> \
+python -m eval c2 --lane confirm \
     --run-id model-confirm --output-root test_results/evaluation --workers 24
 ```
 
@@ -111,8 +114,8 @@ PureACS, and aggregate exact McNemar plus co-success paired-dJ
 (Wilcoxon/sign-test) statistics.
 
 ```bash
-python -m eval population --checkpoint <chosen-checkpoint> \
-    --run-id model-population --output-root test_results/evaluation \
+python -m eval population --run-id model-population \
+    --output-root test_results/evaluation \
     --num-agents 10,20,40 --seeds 0-49 --steps 6000 --bound 250 \
     --policies deterministic,stochastic,pure_acs --device cpu --workers 8
 ```
@@ -122,9 +125,80 @@ throughput diagnosis and batching experiments, but it must have a distinct run
 ID and be labelled diagnostic; do not combine it with or silently substitute it
 for the CPU population. Use `--device cuda:N --batch-size B` only for that lane.
 
+## Configurable sensitivity suite
+
+The sensitivity suite runs one-factor-at-a-time diagnostics from a versioned
+YAML specification. The maintained presets cover the standard OAT study and the
+small-turn-radius, time-refined study:
+
+```bash
+python -m eval sensitivity run \
+    --config eval/sensitivity/configs/oat.yaml \
+    --run-id dknn-oat --output-root test_results/evaluation
+
+python -m eval sensitivity run \
+    --config eval/sensitivity/configs/refined_near_zero.yaml \
+    --run-id dknn-near-zero --output-root test_results/evaluation
+
+python -m eval sensitivity validate \
+    --run test_results/evaluation/dknn-oat/sensitivity
+python -m eval sensitivity plot \
+    --run test_results/evaluation/dknn-oat/sensitivity
+```
+
+The config is the source of truth for the baseline, factor values, policies,
+seeds, and temporal profile. `--dry-run` previews the expanded settings and job
+count. `--factors`, `--settings`, `--policies`, and `--seeds` select part of that
+plan for a distinct filtered bundle, or repeat the identical selection when
+resuming it; `--checkpoint`, `--device`,
+`--batch-size`, `--workers`, and `--repair-invalid` are explicit execution
+overrides. Filters are part of the bundle fingerprint, so separately filtered
+shards need distinct run IDs and are not silently merged. Validate a completed
+bundle before plotting it. Plotting requires `pure_acs` and at least one learned
+policy evaluated on the same seeds. A filtered OAT plan records the factors
+represented by its non-baseline `--settings` (a baseline-only plan retains the
+requested `--factors`). Plots use that resolved list while the one shared
+baseline setting keeps its canonical membership in all five OAT factors.
+
+Both presets run `learned_deterministic`, `learned_stochastic`, and `pure_acs`
+for seeds 0--99 and 6000 policy steps. Their explicit baseline is N=20,
+speed=15, minimum turn radius=28.125, interaction/C2 radius=60, ACS
+lambda/sigma=5/1, and initial bound=250. The OAT ranges are N=`10,20,40,80`;
+turn radius=`14.0625,21.09375,28.125,42.1875,56.25`; interaction radius=
+`30,45,60,90,120`; joint ACS gain multiplier=`0.5,0.75,1,1.5,2`; and initial
+bound=`125,187.5,250,375,500`. The shared baseline is executed only once, for
+20 unique OAT settings in total.
+
+The refined preset tests turn radii
+`14.0625,7.03125,3.515625,1.7578125,0.87890625,0.477464829275686`. It computes
+`ceil(max_turn_rate * 0.1 / max_heading_change_per_substep)` dynamics steps per
+policy interval, giving `2,4,8,16,32,59` for the checked-in limit. A full OAT
+run is 36 million environment steps; the refined preset is 217.8 million
+dynamics substeps, so use `--dry-run` and filtered smoke runs before launching
+the complete jobs.
+
+Sensitivity episodes use compact artifacts containing the scalar series,
+outcome, and metadata needed for C2 summaries and paired comparisons. They do
+not record full state, action, or control trajectories; use the population suite
+when radius, heatmap, or control-effort analysis is required. The sensitivity
+bundle writes `settings.csv`, `episodes.csv`, `aggregate.csv`,
+`paired_vs_acs.csv`, and `dominance.csv` under `summaries/`.
+
+All maintained sensitivity settings are judged offline with `main_c2_v1`, but
+they are diagnostic results, not the official confirmation lane. In the refined
+profile the policy still acts at 10 Hz: each 0.1-second policy interval is split
+into smaller dynamics steps, each learned pointer action is held for that
+interval, and its realized mask and ACS control are recomputed at every substep.
+PureACS also recomputes its farthest-neighbor pointer at every substep.
+
+The presets carry forward the experimental questions from the historical
+sensitivity farm, not a claim that its published numbers are reproduced. The
+current protocol, checkpoint, implementation, and sparse artifact contract are
+authoritative for new runs; historical farm outputs remain read-only records.
+
 ## Artifacts, resume, and validation
 
-Each C2 or population run owns one output bundle with a versioned
+Each C2, population, or sensitivity run owns one output bundle with a versioned
 `manifest.json`, a fingerprint of its immutable specification, episode files,
 summaries, and validation records. A rerun may reuse an episode only after its
 shape and metadata match the manifest. A mismatched fingerprint fails instead
@@ -134,8 +208,8 @@ explicit recovery action: invalid files are moved under the bundle's
 criterion.
 
 The unified CLI lays bundles out as
-`<output-root>/<run-id>/c2_dev`, `c2_confirm`, or `population`. Pass the suite
-directory itself to `validate` and the analysis commands.
+`<output-root>/<run-id>/c2_dev`, `c2_confirm`, `population`, or `sensitivity`.
+Pass the suite directory itself to its validation and analysis commands.
 
 Atomic artifact writes honor the invoking process's umask and directory ACLs
 (for example, umask `0002` produces group-readable/writable files and
@@ -164,9 +238,9 @@ field names for analysis, but they do not rewrite or migrate files in place,
 relabel an old protocol as `main_c2_v1`, or treat a legacy short horizon as a
 valid 6000-step failure observation. When reading a legacy bundle, always pass
 an explicit analysis `--output` under the new artifact root rather than writing
-derived files beside the historical record. The unified analysis commands
-enforce this: a legacy/noncanonical input is rejected when the output is
-omitted or resolves inside the source bundle.
+derived files beside the historical record. The full-trajectory population
+analysis commands enforce this: a legacy/noncanonical input is rejected when
+the output is omitted or resolves inside the source bundle.
 
 ## One-shot Docker runner
 
@@ -190,8 +264,9 @@ durable training runner's `uom-neighbor-selection`; therefore an evaluation
 start. Set `IMAGE_NAME` explicitly only when intentionally sharing a tag. No
 GPU is exposed by default.
 `DEVICE=cuda:0`, `GPU_REQUEST=...`, or an evaluator `--device cuda:0` explicitly
-requests Docker GPU access; `DEVICE` is also the population CLI default when
-`--device` is omitted. The runner uses a unique container name, performs a
+requests Docker GPU access; `DEVICE` is also the population and sensitivity CLI
+default when `--device` is omitted. CUDA population and sensitivity runs require
+an explicit `--batch-size`. The runner uses a unique container name, performs a
 foreground one-shot `docker run --rm`, and forwards host-side git commit/dirty
 provenance—including tracked diffs and untracked, non-ignored files—because a
 linked worktree's host `.git` pointer is unavailable in the container.
