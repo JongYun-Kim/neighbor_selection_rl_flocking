@@ -105,7 +105,11 @@ def _parser():
     population.add_argument("--steps", type=int, default=6000)
     population.add_argument("--bound", type=float, default=250.0)
     population.add_argument("--policies", type=_comma_strings,
-                            default=list(("deterministic", "stochastic", "pure_acs")))
+                            default=list(("deterministic", "stochastic", "pure_acs")),
+                            help=("comma list; default: deterministic,stochastic,"
+                                  "pure_acs. The opt-in arm knn12 (fixed k=12 "
+                                  "nearest neighbors) needs a binary_vector "
+                                  "checkpoint run"))
     population.add_argument("--device", type=_device, default=DEFAULT_DEVICE)
     population.add_argument("--batch-size", type=int)
     population.add_argument("--workers", type=int, default=8)

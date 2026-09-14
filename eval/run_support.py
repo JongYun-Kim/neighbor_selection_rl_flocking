@@ -67,7 +67,10 @@ def utc_now() -> str:
 
 
 def checkpoint_identity(checkpoint_path: Path) -> Dict[str, object]:
-    source = resolve_dynamic_checkpoint(checkpoint_path)
+    # Identity is the checkpoint's content hash, not its action encoding: the
+    # population and sensitivity lanes evaluate cutoff-pointer and binary-mask
+    # checkpoints through the same manifest, so the pointer guard is dropped.
+    source = resolve_dynamic_checkpoint(checkpoint_path, require_dknn=False)
     checkpoint = Path(source["checkpoint"])
     config_file = Path(source["config_file"])
     if source["kind"] == "rllib":
@@ -118,7 +121,8 @@ def archive_checkpoint(bundle: Path, checkpoint_path: Path,
                        checkpoint_info: Dict[str, object],
                        repair_invalid: bool = False) -> str:
     """Atomically archive and verify a complete inference load package."""
-    source = resolve_dynamic_checkpoint(checkpoint_path)
+    # Archiving copies and verifies the load package; see checkpoint_identity.
+    source = resolve_dynamic_checkpoint(checkpoint_path, require_dknn=False)
     archive_root = bundle / "checkpoint"
     if archive_root.exists():
         try:

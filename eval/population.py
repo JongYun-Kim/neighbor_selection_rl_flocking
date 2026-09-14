@@ -9,18 +9,20 @@ import multiprocessing as mp
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
 from eval.artifacts import (
-    FULL_SCHEMA_VERSION, SCALAR_SERIES, atomic_save_npz,
+    FULL_SCHEMA_VERSION, MASK_SCHEMA_VERSION, SCALAR_SERIES, atomic_save_npz,
     atomic_write_json, canonical_json, json_compatible, load_episode,
     run_fingerprint,
     validate_full_episode,
 )
 from eval.common import SERIES_NAMES, _n_components, _pairwise_dist, build_config
-from eval.policies import DynamicKNNInferencePolicy
+from eval.policies import (BinaryInferencePolicy,
+                          DynamicKNNInferencePolicy,
+                          checkpoint_env_overrides, is_dknn_params)
 from eval.provenance import git_snapshot, runtime_snapshot
 from eval.protocol import MAIN_C2_V1, judge_episode_c2
 from eval.run_support import (
@@ -40,17 +42,24 @@ from eval.stats import cvar10, mcnemar, paired_dj, wilson
 PROTOCOL_ID = "main_c2_v1"
 SUITE_ID = "population_v1"
 DEFAULT_POLICIES = ("deterministic", "stochastic", "pure_acs")
+# Opt-in arms: never in the default set, so existing bundles are unchanged.
+EXTRA_POLICIES = ("knn12",)
 DEFAULT_NUM_AGENTS = (10, 20, 40)
 
 
 def _build_config(n_agents: int, horizon: int, bound: float,
-                  obs_position_scale: str):
+                  obs_position_scale: str,
+                  env_overrides: Optional[Dict[str, object]] = None):
     cfg = build_config(n_agents=n_agents, max_steps=horizon,
                        initial_position_bound=bound)
-    cfg.env.action_type = "dynamic_k_nn"
-    cfg.env.evaluation_diagnostics = True
-    cfg.env.expose_aux_target = False
-    cfg.env.expose_global_stats = False
+    if env_overrides is None:
+        cfg.env.action_type = "dynamic_k_nn"
+        cfg.env.evaluation_diagnostics = True
+        cfg.env.expose_aux_target = False
+        cfg.env.expose_global_stats = False
+    else:
+        for key, value in env_overrides.items():
+            setattr(cfg.env, key, value)
     cfg.env.obs_position_scale = obs_position_scale
     cfg.env.termination_mode = "legacy"  # fixed horizon; judge offline
     cfg.env.reward_mode = "legacy"       # is_training=False -> raw control cost
@@ -65,7 +74,10 @@ class FullAccumulator:
         self.n_agents = int(env.num_agents_max)
         self.states = np.empty((horizon + 1, self.n_agents, 5), dtype=np.float64)
         self.states[0] = env.state["agent_states"].copy()
-        self.pointer = np.empty((horizon, self.n_agents), dtype=np.int16)
+        self.pointer = (
+            np.empty((horizon, self.n_agents), dtype=np.int16)
+            if env.config.env.action_type == "dynamic_k_nn" else None
+        )
         self.binary = np.empty((horizon, self.n_agents, self.n_agents), dtype=np.bool_)
         self.controls = np.empty((horizon, self.n_agents), dtype=np.float64)
         self.deg_agents = np.empty((horizon, self.n_agents), dtype=np.int16)
@@ -124,7 +136,8 @@ class FullAccumulator:
         controls = info.get("control_inputs")
         if mask is None or controls is None:
             raise RuntimeError("evaluation_diagnostics did not return action/control")
-        self.pointer[step_index] = pointer
+        if self.pointer is not None:
+            self.pointer[step_index] = pointer
         self.binary[step_index] = np.asarray(mask, dtype=np.bool_)
         self.controls[step_index] = np.asarray(controls, dtype=np.float64)
         self.states[step_index + 1] = self.env.state["agent_states"].copy()
@@ -159,10 +172,11 @@ class FullAccumulator:
             "initial_state_sha256": _state_hash(self.states[0]),
         })
         payload = {
-            "schema_version": np.asarray(FULL_SCHEMA_VERSION),
+            "schema_version": np.asarray(
+                FULL_SCHEMA_VERSION if self.pointer is not None
+                else MASK_SCHEMA_VERSION),
             "meta": np.asarray(canonical_json(meta)),
             "agent_states": self.states,
-            "pointer_actions": self.pointer,
             "binary_actions": self.binary,
             "control_inputs": self.controls,
             "deg_agents": self.deg_agents,
@@ -172,6 +186,8 @@ class FullAccumulator:
             "success": np.asarray(judgment["success"], dtype=np.int8),
             "J": np.asarray(judgment["J"], dtype=np.float64),
         }
+        if self.pointer is not None:
+            payload["pointer_actions"] = self.pointer
         if payload["snap_ts"][-1] != self.horizon:
             payload["pos_snaps"] = np.concatenate([
                 payload["pos_snaps"], self.states[-1:, :, :2].astype(np.float32)
@@ -210,7 +226,8 @@ def _run_group(job: Dict[str, object]) -> List[Dict[str, object]]:
     batch_size = int(job["batch_size"])
     checkpoint = Path(job["checkpoint"])
     checkpoint_id = str(job["checkpoint_id"])
-    cfg = _build_config(n_agents, horizon, bound, str(job["obs_position_scale"]))
+    cfg = _build_config(n_agents, horizon, bound, str(job["obs_position_scale"]),
+                        job.get("env_overrides"))
     actual_config_hash = run_fingerprint(cfg.dict())
     if actual_config_hash != job["config_sha256"]:
         raise ValueError("effective evaluation config differs from bundle manifest")
@@ -223,6 +240,7 @@ def _run_group(job: Dict[str, object]) -> List[Dict[str, object]]:
             raise ValueError(f"effective {name} differs from bundle manifest")
 
     inference = None
+    baseline = None
     summaries = []
     pending = []
     for seed in seeds:
@@ -262,14 +280,27 @@ def _run_group(job: Dict[str, object]) -> List[Dict[str, object]]:
             if policy_name == "stochastic":
                 # Lazily instantiate below after the first env defines spaces.
                 generators.append(None)
-        if policy_name != "pure_acs" and inference is None:
-            inference = DynamicKNNInferencePolicy(checkpoint, envs[0], device=device)
+        if policy_name in ("deterministic", "stochastic") and inference is None:
+            inference = (
+                DynamicKNNInferencePolicy(checkpoint, envs[0], device=device)
+                if cfg.env.action_type == "dynamic_k_nn"
+                else BinaryInferencePolicy(checkpoint, envs[0], device=device)
+            )
+        if policy_name == "knn12" and baseline is None:
+            import baselines
+            baseline = baselines.create_baseline("nearest", k=12)
         if policy_name == "stochastic":
             generators = [inference.make_generator(item[1]) for item in batch]
 
         for step_index in range(horizon):
             if policy_name == "pure_acs":
-                actions = np.stack([pure_acs_pointer(env) for env in envs])
+                actions = (
+                    np.stack([pure_acs_pointer(env) for env in envs])
+                    if cfg.env.action_type == "dynamic_k_nn"
+                    else np.ones((len(envs), n_agents, n_agents), dtype=np.int8)
+                )
+            elif policy_name == "knn12":
+                actions = np.stack([baseline(obs) for obs in observations])
             else:
                 actions = inference.actions(
                     observations, mode=policy_name,
@@ -370,7 +401,9 @@ def summarize(rows: Sequence[Dict[str, object]], bundle: Path):
 def build_manifest(bundle: Path, run_id: str, checkpoint: Path,
                    num_agents: Sequence[int], seeds: Sequence[int], horizon: int,
                    bound: float, policies: Sequence[str], device: str,
-                   batch_size: int) -> Dict[str, object]:
+                   batch_size: int,
+                   env_overrides: Optional[Dict[str, object]] = None
+                   ) -> Dict[str, object]:
     repo_root = Path(__file__).resolve().parents[1]
     checkpoint_info = _checkpoint_identity(checkpoint)
     git = git_snapshot(repo_root)
@@ -378,7 +411,7 @@ def build_manifest(bundle: Path, run_id: str, checkpoint: Path,
     effective_configs = {
         str(int(n_agents)): _build_config(
             int(n_agents), horizon, bound,
-            str(checkpoint_info["obs_position_scale"]),
+            str(checkpoint_info["obs_position_scale"]), env_overrides,
         ).dict()
         for n_agents in num_agents
     }
@@ -387,7 +420,7 @@ def build_manifest(bundle: Path, run_id: str, checkpoint: Path,
     }
     representative = _build_config(
         int(num_agents[0]), horizon, bound,
-        str(checkpoint_info["obs_position_scale"]),
+        str(checkpoint_info["obs_position_scale"]), env_overrides,
     )
     spec = {
         "suite": SUITE_ID, "protocol_id": PROTOCOL_ID,
@@ -400,7 +433,11 @@ def build_manifest(bundle: Path, run_id: str, checkpoint: Path,
         "checkpoint_tree_sha256": checkpoint_info["tree_sha256"],
         "effective_config_sha256_by_num_agents": config_hashes,
         "effective_config_by_num_agents": effective_configs,
-        "schema_version": FULL_SCHEMA_VERSION,
+        "schema_version": (
+            FULL_SCHEMA_VERSION
+            if representative.env.action_type == "dynamic_k_nn"
+            else MASK_SCHEMA_VERSION),
+        "env_overrides": env_overrides,
         "dt": float(representative.env.dt),
         "speed": float(representative.control.speed),
         "r0": float(representative.control.r0),
@@ -440,11 +477,19 @@ def run_population(checkpoint: os.PathLike, bundle: os.PathLike, run_id: str,
         raise ValueError("CUDA population evaluation requires --batch-size > 0")
     if device == "cpu":
         batch_size = 1  # criterion-compatible single-episode inference
-    invalid_policies = set(policies).difference(DEFAULT_POLICIES)
+    invalid_policies = set(policies).difference(DEFAULT_POLICIES + EXTRA_POLICIES)
     if invalid_policies:
         raise ValueError(f"unsupported population policies: {sorted(invalid_policies)}")
+    with (checkpoint.parent / "params.json").open(encoding="utf-8") as stream:
+        params = json.load(stream)
+    if "knn12" in policies and is_dknn_params(params):
+        # A bundle is one checkpoint and one schema id; the fixed-k arm emits a
+        # mask and would need the binary env, mixing two ids in one bundle.
+        raise ValueError("knn12 arm requires a binary_vector checkpoint run")
+    env_overrides = checkpoint_env_overrides(params)
     manifest = build_manifest(bundle, run_id, checkpoint, num_agents, seeds,
-                              horizon, bound, policies, device, batch_size)
+                              horizon, bound, policies, device, batch_size,
+                              env_overrides)
     manifest_path = bundle / "manifest.json"
     if manifest_path.is_file():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -482,6 +527,7 @@ def run_population(checkpoint: os.PathLike, bundle: os.PathLike, run_id: str,
                 "r0": manifest["spec"]["r0"],
                 "rho": manifest["spec"]["rho"],
                 "n_agents": int(n_agents), "bound": float(bound),
+                "env_overrides": manifest["spec"]["env_overrides"],
                 "seeds": list(seeds), "horizon": int(horizon), "policy": policy,
                 "device": device, "batch_size": int(batch_size),
                 "repair_invalid": bool(repair_invalid),
@@ -662,19 +708,21 @@ def validate_population_episode(view, expected: Dict[str, object],
                                 deep: bool = False) -> Dict[str, object]:
     """Validate one canonical population episode and return trusted summary."""
     validate_full_episode(view, expected=expected)
-    if view.schema_version != FULL_SCHEMA_VERSION or view.legacy:
+    if view.schema_version not in (
+            FULL_SCHEMA_VERSION, MASK_SCHEMA_VERSION) or view.legacy:
         raise ValueError(f"population cache is not canonical: {view.path}")
     summary = _recomputed_summary(view)
     if not deep:
         return summary
 
     states = np.asarray(view["agent_states"], dtype=np.float64)
-    pointers = np.asarray(view["pointer_actions"])
     binary = np.asarray(view["binary_actions"], dtype=bool)
     controls = np.asarray(view["control_inputs"], dtype=np.float64)
-    rebuilt = reconstruct_cutoff_mask(states, pointers)
-    if not np.array_equal(rebuilt, binary):
-        raise ValueError(f"pointer/mask mismatch: {view.path}")
+    if "pointer_actions" in view:
+        pointers = np.asarray(view["pointer_actions"])
+        rebuilt = reconstruct_cutoff_mask(states, pointers)
+        if not np.array_equal(rebuilt, binary):
+            raise ValueError(f"pointer/mask mismatch: {view.path}")
     derived = _derived_full_series(
         states, binary, controls,
         dt=float(expected["dt"]), speed=float(expected["speed"]),
