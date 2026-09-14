@@ -125,6 +125,20 @@ throughput diagnosis and batching experiments, but it must have a distinct run
 ID and be labelled diagnostic; do not combine it with or silently substitute it
 for the CPU population. Use `--device cuda:N --batch-size B` only for that lane.
 
+The suite also accepts a checkpoint whose action is a per-edge binary mask
+rather than a cutoff pointer. The checkpoint's own `params.json` selects the
+environment wiring, so no flag is needed. Such a bundle stores no
+`pointer_actions` and is tagged `main-c2-full-mask-2.0` instead of
+`main-c2-full-2.0`; the PureACS arm emits the all-ones mask there. `knn12` is an
+opt-in fixed-k nearest arm for that lane only, since it emits a mask and a
+bundle carries exactly one schema id:
+
+```bash
+python -m eval population --checkpoint <binary-mask checkpoint> \
+    --run-id model-population --output-root test_results/evaluation \
+    --policies deterministic,stochastic,pure_acs,knn12 --workers 12
+```
+
 ## Configurable sensitivity suite
 
 The sensitivity suite runs one-factor-at-a-time diagnostics from a versioned
@@ -176,6 +190,13 @@ policy interval, giving `2,4,8,16,32,59` for the checked-in limit. A full OAT
 run is 36 million environment steps; the refined preset is 217.8 million
 dynamics substeps, so use `--dry-run` and filtered smoke runs before launching
 the complete jobs.
+
+Like the population suite, the sensitivity runner dispatches on the
+checkpoint's `params.json`, so a binary-mask checkpoint runs the same settings
+without a flag; only the policy class and the PureACS action encoding change.
+The resolved wiring is recorded as `spec.env_overrides`, which participates in
+the bundle fingerprint, so an existing bundle cannot be resumed under a
+different checkpoint kind.
 
 Sensitivity episodes use compact artifacts containing the scalar series,
 outcome, and metadata needed for C2 summaries and paired comparisons. They do
@@ -241,6 +262,37 @@ an explicit analysis `--output` under the new artifact root rather than writing
 derived files beside the historical record. The full-trajectory population
 analysis commands enforce this: a legacy/noncanonical input is rejected when
 the output is omitted or resolves inside the source bundle.
+
+## Selection and effort metrics (`eval.rmetrics`)
+
+The C2 and fixed-k reference lanes store `agent_states`, `binary_actions`,
+`control_inputs`, and -- for pointer checkpoints -- `pointer_actions` alongside
+their existing series, so the selection axis can be reconstructed offline. No
+rollout loop computes these metrics online, and no existing summary CSV gains a
+column: `eval.rmetrics` writes its own derived files beside the source bundle.
+
+`compute` derives, per episode, the effective radius (R1), effective k (R2),
+compactness (R3), rank deviation (R4), per-rank selection probability (R5), and
+edge asymmetry (R6), together with the control-effort columns of
+`eval.analysis.control_effort` and a turn-rate saturation fraction. Windows are
+the first 300 and last 300 action steps plus the full horizon; an agent that
+selects nobody contributes NaN to the per-agent metrics and is counted in a
+separate `k0_rate` column.
+
+```bash
+python -m eval.rmetrics compute --kind population \
+    --source test_results/evaluation/model-population/population --workers 16
+python -m eval.rmetrics table --arm dknn=<summary.csv> --arm full_NN=<summary.csv> \
+    --pairs full_NN:dknn --out <table.csv>
+python -m eval.rmetrics figures --arm dknn=<summary.csv> --out <figure dir>
+```
+
+`--kind` selects the layout to read (`population`, `c2`, `knnref`). Pass `--out`
+to keep derived files out of a read-only source bundle. The summary CSV carries
+self-validation flags: the realized degree against the stored `deg_agents`, R1
+against the pointer cutoff radius, and the degenerate values that a pointer,
+fixed-k, or full-coupling arm must show. `table` reports medians, IQRs, and
+seed-paired differences only -- it runs no hypothesis test.
 
 ## One-shot Docker runner
 
@@ -335,6 +387,10 @@ export ARTIFACT_ROOT=/absolute/path/to/evaluation-artifacts
 ./docker/run_eval.sh control-effort \
     --run /workspace/artifacts/chosen-model-population/population --animations
 ```
+
+`heatmaps` and `radii` default to the deterministic arm; `--policy pure_acs`
+(or `knn12`, `stochastic`) analyses another arm of the same bundle and writes to
+a `_<policy>`-suffixed view directory, leaving the default paths untouched.
 
 Omit `--t-max-seconds` for full-horizon heatmaps. Analysis commands consume the
 recorded artifacts; they do not rerun the policy or alter the source bundle's
