@@ -386,6 +386,35 @@ def _expected_meta(job, setting: SensitivitySetting, policy: str, seed: int,
     }
 
 
+# Jobs are dispatched one at a time, so several per worker slot is what
+# balances a heterogeneous mix: an N=40 learned block costs ~20x an N=10
+# pure_acs one.  Four is enough to keep every slot busy without paying a model
+# load per episode, and keeps the job count inside Pool.map's chunksize-1 range.
+BLOCKS_PER_WORKER = 4
+
+
+def _seed_blocks(seeds, base_jobs: int, batch_size: int,
+                 workers: int) -> List[List[int]]:
+    """Cut the seed list into contiguous ascending blocks for the worker pool.
+
+    The work unit is otherwise (setting, policy), which caps the pool at three
+    processes per setting no matter how large ``--workers`` is.  Episodes are
+    independent across seeds, so which process runs which seed is a scheduling
+    detail only.  Block size is rounded up to a whole number of seed batches so
+    ``_run_job`` still sees the configured batch boundaries, and blocks stay
+    contiguous and ascending so flattening the per-block results reproduces the
+    previous (setting, policy, ascending seed) row order.  Nothing about the
+    split reaches the manifest spec or the episode metadata.
+    """
+    seeds = [int(seed) for seed in seeds]
+    if not seeds or base_jobs <= 0:
+        return [seeds]
+    blocks = max(1, -(-BLOCKS_PER_WORKER * int(workers) // int(base_jobs)))
+    size = max(1, -(-len(seeds) // blocks))
+    size = -(-size // int(batch_size)) * int(batch_size)
+    return [seeds[start:start + size] for start in range(0, len(seeds), size)]
+
+
 def _run_job(job: Dict[str, object]) -> List[Dict[str, object]]:
     setting = job["setting"]
     if not isinstance(setting, SensitivitySetting):
@@ -623,35 +652,42 @@ def run_sensitivity(checkpoint: os.PathLike, bundle: os.PathLike, run_id: str,
     manifest["updated_at_utc"] = utc_now()
     atomic_write_json(manifest_path, manifest)
 
+    parallel = device == "cpu" and workers > 1
+    seed_blocks = (
+        _seed_blocks(config.seeds, len(config.settings) * len(config.policies),
+                     int(batch_size), workers)
+        if parallel else [list(config.seeds)]
+    )
     jobs = []
     for setting in config.settings:
         for policy in config.policies:
-            jobs.append({
-                "bundle": str(bundle),
-                "run_id": run_id,
-                "fingerprint": manifest["fingerprint"],
-                "checkpoint": str(evaluation_checkpoint),
-                "checkpoint_id": manifest["checkpoint"]["id"],
-                "checkpoint_hash": manifest["checkpoint"]["package_sha256"],
-                "obs_position_scale": manifest["checkpoint"]["obs_position_scale"],
-                "config_sha256": manifest["spec"][
-                    "effective_config_sha256_by_setting"][setting.setting_id],
-                "env_overrides": manifest["spec"]["env_overrides"],
-                "setting": setting,
-                "policy": policy,
-                "seeds": list(config.seeds),
-                "horizon": config.horizon,
-                "policy_interval_seconds": config.policy_interval_seconds,
-                "physics_horizon": config.horizon
-                * setting.substeps_per_policy_interval,
-                "device": str(device),
-                "batch_size": int(batch_size),
-                "repair_invalid": bool(repair_invalid),
-            })
-    if device == "cpu" and workers > 1:
+            for seed_block in seed_blocks:
+                jobs.append({
+                    "bundle": str(bundle),
+                    "run_id": run_id,
+                    "fingerprint": manifest["fingerprint"],
+                    "checkpoint": str(evaluation_checkpoint),
+                    "checkpoint_id": manifest["checkpoint"]["id"],
+                    "checkpoint_hash": manifest["checkpoint"]["package_sha256"],
+                    "obs_position_scale": manifest["checkpoint"]["obs_position_scale"],
+                    "config_sha256": manifest["spec"][
+                        "effective_config_sha256_by_setting"][setting.setting_id],
+                    "env_overrides": manifest["spec"]["env_overrides"],
+                    "setting": setting,
+                    "policy": policy,
+                    "seeds": list(seed_block),
+                    "horizon": config.horizon,
+                    "policy_interval_seconds": config.policy_interval_seconds,
+                    "physics_horizon": config.horizon
+                    * setting.substeps_per_policy_interval,
+                    "device": str(device),
+                    "batch_size": int(batch_size),
+                    "repair_invalid": bool(repair_invalid),
+                })
+    if parallel:
         context = mp.get_context("spawn")
         with context.Pool(min(int(workers), len(jobs))) as pool:
-            groups = pool.map(_run_job, jobs)
+            groups = pool.map(_run_job, jobs, chunksize=1)
     else:
         groups = [_run_job(job) for job in jobs]
     rows = [row for group in groups for row in group]

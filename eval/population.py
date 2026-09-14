@@ -210,6 +210,33 @@ def _validate_cached(path: Path, expected_meta: Dict[str, object]):
     return validate_population_episode(view, expected_meta, deep=True)
 
 
+# Jobs are dispatched one at a time, so several per worker slot is what
+# balances a heterogeneous mix: an N=40 learned block costs ~20x an N=10
+# pure_acs one.  Four is enough to keep every slot busy without paying a model
+# load per episode, and keeps the job count inside Pool.map's chunksize-1 range.
+BLOCKS_PER_WORKER = 4
+
+
+def _seed_blocks(seeds: Sequence[int], base_jobs: int,
+                 workers: int) -> List[List[int]]:
+    """Cut the seed list into contiguous ascending blocks for the worker pool.
+
+    The work unit is otherwise (N, policy), which caps the pool at nine or
+    twelve processes no matter how large ``--workers`` is.  Episodes are
+    independent across seeds -- each builds its own env and derives its own
+    action seed -- so which process runs which seed is a scheduling detail
+    only.  Blocks stay contiguous and ascending so flattening the per-block
+    results reproduces the previous (N, policy, ascending seed) row order, and
+    nothing about the split reaches the manifest spec or the episode metadata.
+    """
+    seeds = [int(seed) for seed in seeds]
+    if not seeds or base_jobs <= 0:
+        return [seeds]
+    blocks = max(1, -(-BLOCKS_PER_WORKER * int(workers) // int(base_jobs)))
+    size = max(1, -(-len(seeds) // blocks))
+    return [seeds[start:start + size] for start in range(0, len(seeds), size)]
+
+
 def _run_group(job: Dict[str, object]) -> List[Dict[str, object]]:
     # Imports remain process-local so CPU groups can run independently.
     import torch
@@ -511,32 +538,37 @@ def run_population(checkpoint: os.PathLike, bundle: os.PathLike, run_id: str,
     atomic_write_json(manifest_path, manifest)
 
     checkpoint_info = manifest["checkpoint"]
+    parallel = device == "cpu" and workers > 1
+    seed_blocks = (_seed_blocks(seeds, len(num_agents) * len(policies), workers)
+                   if parallel else [list(seeds)])
     jobs = []
     for n_agents in num_agents:
         for policy in policies:
-            jobs.append({
-                "bundle": str(bundle), "run_id": run_id,
-                "fingerprint": manifest["fingerprint"],
-                "checkpoint": str(evaluation_checkpoint), "checkpoint_id": checkpoint_info["id"],
-                "checkpoint_hash": checkpoint_info["package_sha256"],
-                "obs_position_scale": checkpoint_info["obs_position_scale"],
-                "config_sha256": manifest["spec"][
-                    "effective_config_sha256_by_num_agents"][str(int(n_agents))],
-                "dt": manifest["spec"]["dt"],
-                "speed": manifest["spec"]["speed"],
-                "r0": manifest["spec"]["r0"],
-                "rho": manifest["spec"]["rho"],
-                "n_agents": int(n_agents), "bound": float(bound),
-                "env_overrides": manifest["spec"]["env_overrides"],
-                "seeds": list(seeds), "horizon": int(horizon), "policy": policy,
-                "device": device, "batch_size": int(batch_size),
-                "repair_invalid": bool(repair_invalid),
-            })
+            for seed_block in seed_blocks:
+                jobs.append({
+                    "bundle": str(bundle), "run_id": run_id,
+                    "fingerprint": manifest["fingerprint"],
+                    "checkpoint": str(evaluation_checkpoint),
+                    "checkpoint_id": checkpoint_info["id"],
+                    "checkpoint_hash": checkpoint_info["package_sha256"],
+                    "obs_position_scale": checkpoint_info["obs_position_scale"],
+                    "config_sha256": manifest["spec"][
+                        "effective_config_sha256_by_num_agents"][str(int(n_agents))],
+                    "dt": manifest["spec"]["dt"],
+                    "speed": manifest["spec"]["speed"],
+                    "r0": manifest["spec"]["r0"],
+                    "rho": manifest["spec"]["rho"],
+                    "n_agents": int(n_agents), "bound": float(bound),
+                    "env_overrides": manifest["spec"]["env_overrides"],
+                    "seeds": list(seed_block), "horizon": int(horizon), "policy": policy,
+                    "device": device, "batch_size": int(batch_size),
+                    "repair_invalid": bool(repair_invalid),
+                })
 
-    if device == "cpu" and workers > 1:
+    if parallel:
         context = mp.get_context("spawn")
         with context.Pool(min(int(workers), len(jobs))) as pool:
-            grouped = pool.map(_run_group, jobs)
+            grouped = pool.map(_run_group, jobs, chunksize=1)
     else:
         grouped = [_run_group(job) for job in jobs]
     rows = [row for group in grouped for row in group]
