@@ -39,7 +39,7 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 import numpy as np
 
 from eval.defaults import DEFAULT_CHECKPOINT, DEFAULT_CHECKPOINT_LABEL
-from eval.policies import (induced_mask_from_obs, is_dknn_params,
+from eval.policies import (checkpoint_env_overrides, induced_mask_from_obs,
                            load_policy)
 from eval.protocol import MAIN_C2_V1, first_fire_c2, judge_episode_c2
 from utils.paths import repo_path
@@ -137,17 +137,8 @@ def run_one(args):
     with open(os.path.join(os.path.dirname(ckpt), "params.json")) as f:
         _params = json.load(f)
     _penv = _params.get("env_config", {}).get("config", {}).get("env", {})
-    _is_dknn = is_dknn_params(_params)
-    if _is_dknn:
-        cfg.env.action_type = "dynamic_k_nn"
-        # env-side realized-mask reporting: selection-graph series and any
-        # downstream forensics use the env's own pointer->mask conversion
-        cfg.env.evaluation_diagnostics = True
-        cfg.env.expose_aux_target = False
-        cfg.env.expose_global_stats = False
-    else:
-        cfg.env.expose_aux_target = True
-        cfg.env.expose_global_stats = True
+    for _key, _value in checkpoint_env_overrides(_params).items():
+        setattr(cfg.env, _key, _value)
     # Scale-robustness study: the eval env must observe in the SAME scale
     # system the checkpoint was trained with. Read it from the run's
     # params.json (old checkpoints lack the field -> legacy). The L pool is

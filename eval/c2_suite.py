@@ -19,7 +19,7 @@ from eval.artifacts import (
 from eval.checkpoint_selection import checkpoint_state_paths
 from eval.common import build_config
 from eval.eval_c2 import judge_npz, run_one
-from eval.policies import is_dknn_params
+from eval.policies import checkpoint_env_overrides
 from eval.provenance import git_snapshot, runtime_snapshot
 from eval.protocol import MAIN_C2_V1
 
@@ -71,14 +71,8 @@ def _effective_config(checkpoint: Path, steps: int, bound: float,
     cfg = build_config(
         n_agents=n_agents, max_steps=steps, initial_position_bound=bound)
     env_params = params.get("env_config", {}).get("config", {}).get("env", {})
-    if is_dknn_params(params):
-        cfg.env.action_type = "dynamic_k_nn"
-        cfg.env.evaluation_diagnostics = True
-        cfg.env.expose_aux_target = False
-        cfg.env.expose_global_stats = False
-    else:
-        cfg.env.expose_aux_target = True
-        cfg.env.expose_global_stats = True
+    for key, value in checkpoint_env_overrides(params).items():
+        setattr(cfg.env, key, value)
     cfg.env.obs_position_scale = env_params.get("obs_position_scale", "legacy")
     return cfg.dict()
 

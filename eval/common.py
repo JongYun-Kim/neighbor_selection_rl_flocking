@@ -95,6 +95,9 @@ def run_episode(k=None, distance_threshold=None, n_agents=20, max_steps=3000,
     """
     assert (k is None) != (distance_threshold is None), "give k XOR distance_threshold"
     cfg = build_config(n_agents, max_steps, initial_position_bound)
+    # Raw-trajectory artifacts need info["control_inputs"]; the realized mask
+    # of a binary baseline is the action itself, so no series value changes.
+    cfg.env.evaluation_diagnostics = True
     if k is not None:
         baseline = create_baseline("nearest", k=int(k))
     else:
@@ -119,6 +122,18 @@ def rollout(policy, cfg, seed, pos_stride=10, extra_meta=None):
 
     rec = {name: np.full(T + 1, np.nan, dtype=np.float32) for name in SERIES_NAMES}
     pos_snaps, snap_ts = [], []
+
+    # Raw trajectories, stored with the same names/shapes/dtypes the population
+    # lane uses (eval/population.py FullAccumulator), so post-hoc metrics read
+    # both lanes through one set of keys.  agent_states[0] is the reset state
+    # and agent_states[t] is the state after the t-th step; the action, mask and
+    # control inputs of that step sit at index t-1.
+    n_max = int(env.num_agents_max)
+    agent_states = np.empty((T + 1, n_max, 5), dtype=np.float64)
+    binary_actions = np.empty((T, n_max, n_max), dtype=np.bool_)
+    control_inputs = np.empty((T, n_max), dtype=np.float64)
+    pointer_actions = None
+    agent_states[0] = env.state["agent_states"]
 
     def state_metrics():
         st = env.state["agent_states"]
@@ -175,6 +190,18 @@ def rollout(policy, cfg, seed, pos_stride=10, extra_meta=None):
         if info is not None and "binary_action" in info:
             a_mask = info["binary_action"]
         pos = log_step(t, a_mask, info)
+        agent_states[t] = env.state["agent_states"]
+        binary_actions[t - 1] = np.asarray(a_mask, dtype=np.bool_)
+        if info is None or "control_inputs" not in info:
+            raise RuntimeError(
+                "evaluation_diagnostics must be on to record control_inputs")
+        control_inputs[t - 1] = np.asarray(info["control_inputs"],
+                                           dtype=np.float64)
+        action_array = np.asarray(action)
+        if action_array.ndim == 1:
+            if pointer_actions is None:
+                pointer_actions = np.empty((T, n_max), dtype=np.int16)
+            pointer_actions[t - 1] = action_array
         rec["reward"][t] = reward
         a = a_mask[np.ix_(act_idx, act_idx)].astype(bool)
         edges = a & ~np.eye(n, dtype=bool)
@@ -212,6 +239,18 @@ def rollout(policy, cfg, seed, pos_stride=10, extra_meta=None):
     meta.update(extra_meta or {})
     meta.setdefault("k", None)
     meta.setdefault("distance_threshold", None)
+    if t != T:
+        # use_fixed_episode_length keeps every eval lane at the full horizon;
+        # a short episode would leave the raw-trajectory buffers unwritten.
+        raise RuntimeError(
+            "episode stopped at step {} of {}; raw trajectories would be "
+            "partially unwritten".format(t, T))
+    # Carried inside rec so save_run stores them without a signature change.
+    rec["agent_states"] = agent_states
+    rec["binary_actions"] = binary_actions
+    rec["control_inputs"] = control_inputs
+    if pointer_actions is not None:
+        rec["pointer_actions"] = pointer_actions
     return rec, np.stack(pos_snaps), np.asarray(snap_ts, dtype=np.int32), meta
 
 

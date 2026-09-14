@@ -36,6 +36,32 @@ def is_dknn_params(params):
     action_type = (params.get("env_config", {}).get("config", {})
                    .get("env", {}).get("action_type", "binary_vector"))
     return custom_model in DKNN_MODEL_NAMES or action_type in DKNN_ACTION_TYPES
+
+
+def checkpoint_env_overrides(params):
+    """Env fields that mirror a checkpoint's training obs/action wiring.
+
+    One place for the dispatch that eval.eval_c2, eval.c2_suite, eval.population
+    and eval.sensitivity.runner all need.  ``obs_position_scale`` is left to the
+    caller because it is read from the run's own params.json, not dispatched on.
+    """
+    if is_dknn_params(params):
+        return {
+            "action_type": "dynamic_k_nn",
+            # env-side realized-mask reporting: selection-graph series and any
+            # downstream forensics use the env's own pointer->mask conversion
+            "evaluation_diagnostics": True,
+            "expose_aux_target": False,
+            "expose_global_stats": False,
+        }
+    return {
+        "action_type": "binary_vector",
+        # Binary policies emit the mask themselves, but the diagnostics also
+        # carry the per-agent control inputs the raw-trajectory artifacts need.
+        "evaluation_diagnostics": True,
+        "expose_aux_target": True,
+        "expose_global_stats": True,
+    }
 # ---------------------------------------------------------------- policy load
 class C2Policy:
     """Deterministic (argmax) policy from an RLlib checkpoint of this study.
