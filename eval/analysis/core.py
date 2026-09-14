@@ -146,6 +146,36 @@ def compute_cutoff_radii(
     return np.linalg.norm(target_positions - positions, axis=2)
 
 
+def compute_mask_radii(
+    states: np.ndarray, binary_actions: np.ndarray
+) -> np.ndarray:
+    """Return every ego's farthest selected distance at each action time.
+
+    The mask counterpart of :func:`compute_cutoff_radii` for policies that emit
+    the ``(N,N)`` selection mask directly and therefore have no pointer.  An ego
+    that selects nobody gets ``0.0``, matching the pointer convention where a
+    self pointer means "selected only myself" and yields a zero radius.
+    """
+
+    states = np.asarray(states, dtype=np.float64)
+    binary = np.asarray(binary_actions)
+    if states.ndim != 3 or states.shape[2] < 2:
+        raise ValueError("states must have shape (T+1, N, >=2)")
+    if binary.ndim != 3 or binary.shape[1] != binary.shape[2]:
+        raise ValueError("binary_actions must have shape (T, N, N)")
+    horizon, num_agents = binary.shape[0], binary.shape[1]
+    if states.shape[:2] != (horizon + 1, num_agents):
+        raise ValueError("state/mask shapes are inconsistent")
+    positions = states[:-1, :, :2]
+    distances = np.linalg.norm(
+        positions[:, :, None, :] - positions[:, None, :, :], axis=3
+    )
+    off_diagonal = binary.astype(bool) & ~np.eye(num_agents, dtype=bool)
+    radii = np.where(off_diagonal, distances, -np.inf).max(axis=2)
+    radii[~off_diagonal.any(axis=2)] = 0.0
+    return radii
+
+
 def pointer_actions_to_mask(
     states: np.ndarray, pointer_actions: np.ndarray
 ) -> np.ndarray:
@@ -291,7 +321,7 @@ class EpisodeData:
     """Validated in-memory view shared by all analysis entry points."""
 
     states: np.ndarray
-    pointer_actions: np.ndarray
+    pointer_actions: Optional[np.ndarray]
     binary_actions: np.ndarray
     phi: np.ndarray
     position_entropy: np.ndarray
@@ -302,11 +332,11 @@ class EpisodeData:
 
     @property
     def horizon(self) -> int:
-        return int(self.pointer_actions.shape[0])
+        return int(self.binary_actions.shape[0])
 
     @property
     def num_agents(self) -> int:
-        return int(self.pointer_actions.shape[1])
+        return int(self.binary_actions.shape[1])
 
 
 def coerce_episode(
@@ -323,23 +353,32 @@ def coerce_episode(
     """
 
     states = np.asarray(_mapping_lookup(episode, "agent_states"), dtype=np.float64)
-    pointer = _integer_array(
-        _mapping_lookup(episode, "pointer_actions"), "pointer_actions"
+    raw_pointer = _mapping_lookup(
+        episode, "pointer_actions", required=False, default=None
+    )
+    pointer = (
+        None if raw_pointer is None
+        else _integer_array(raw_pointer, "pointer_actions")
     )
     binary = _boolean_array(
         _mapping_lookup(episode, "binary_actions"), "binary_actions"
     )
     if states.ndim != 3 or states.shape[2] < 5:
         raise ValueError("agent_states must have shape (T+1, N, >=5)")
-    if pointer.ndim != 2:
-        raise ValueError("pointer_actions must have shape (T, N)")
-    horizon, num_agents = pointer.shape
-    if states.shape[:2] != (horizon + 1, num_agents):
-        raise ValueError("agent_states and pointer_actions shapes are inconsistent")
-    if binary.shape != (horizon, num_agents, num_agents):
+    if binary.ndim != 3 or binary.shape[1] != binary.shape[2]:
         raise ValueError(
             "binary_actions must have shape (T, N, N), got {}".format(binary.shape)
         )
+    horizon, num_agents = binary.shape[0], binary.shape[1]
+    if pointer is not None:
+        if pointer.ndim != 2:
+            raise ValueError("pointer_actions must have shape (T, N)")
+        if pointer.shape != (horizon, num_agents):
+            raise ValueError(
+                "binary_actions and pointer_actions shapes are inconsistent"
+            )
+    if states.shape[:2] != (horizon + 1, num_agents):
+        raise ValueError("agent_states and binary_actions shapes are inconsistent")
     if not np.all(np.isfinite(states)):
         raise ValueError("agent_states contains a non-finite value")
 
@@ -349,8 +388,9 @@ def coerce_episode(
         raise ValueError("meta num_agents disagrees with agent_states")
     meta_horizon = meta.get("horizon", meta.get("max_steps"))
     if meta_horizon is not None and int(meta_horizon) != horizon:
-        raise ValueError("meta horizon disagrees with pointer_actions")
-    if np.any(pointer < 0) or np.any(pointer >= num_agents):
+        raise ValueError("meta horizon disagrees with binary_actions")
+    if pointer is not None and (
+            np.any(pointer < 0) or np.any(pointer >= num_agents)):
         raise ValueError("pointer action contains an out-of-range agent index")
 
     derived_phi = state_polarization(states)
@@ -454,11 +494,22 @@ def validate_pointer_mask(
 
 
 def rank_episode_cutoff_radii(
-    states: np.ndarray, pointer_actions: np.ndarray
+    states: np.ndarray,
+    pointer_actions: Optional[np.ndarray],
+    binary_actions: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
-    """Rank one episode's cutoff radii by position and circular heading context."""
+    """Rank one episode's cutoff radii by position and circular heading context.
 
-    radii = compute_cutoff_radii(states, pointer_actions)
+    Pointer bundles keep the pointer-distance definition unchanged; bundles
+    without a pointer fall back to the realized mask's farthest selection.
+    """
+
+    if pointer_actions is not None:
+        radii = compute_cutoff_radii(states, pointer_actions)
+    elif binary_actions is not None:
+        radii = compute_mask_radii(states, binary_actions)
+    else:
+        raise ValueError("need pointer_actions or binary_actions")
     centered = centered_positions(states)[:-1]
     centroid_distances, centroid_order = centroid_distance_ranking(centered)
     mean_heading, heading_deviation, heading_order = (

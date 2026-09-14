@@ -82,6 +82,9 @@ class PopulationAggregate:
     velocity_entropy_mean: np.ndarray
     velocity_entropy_std: np.ndarray
     max_metric_errors: Mapping[str, float]
+    # False when the population's episodes carry no pointer action, which makes
+    # the pointer/mask cross-check inapplicable rather than merely passing.
+    pointer_bundle: bool = True
 
     def cutoff_values(self, ranking_type: str, statistic: str = "mean") -> np.ndarray:
         if ranking_type not in RANKING_TYPES:
@@ -125,6 +128,7 @@ class PopulationBuilder:
         self._seen_seeds = set()
         self._sources: List[str] = []
         self._max_errors: Dict[str, float] = {}
+        self._pointer_bundle: Optional[bool] = None
 
     @property
     def count(self) -> int:
@@ -137,7 +141,15 @@ class PopulationBuilder:
             )
         if self.require_deterministic:
             require_deterministic_episode(episode)
-        validate_pointer_mask(episode)
+        has_pointer = episode.pointer_actions is not None
+        if self._pointer_bundle is None:
+            self._pointer_bundle = has_pointer
+        elif self._pointer_bundle != has_pointer:
+            raise ValueError(
+                "population mixes pointer and pointer-less episodes"
+            )
+        if has_pointer:
+            validate_pointer_mask(episode)
         dt = resolve_dt(episode, self.dt_override)
         if self._horizon is None:
             self._horizon = episode.horizon
@@ -161,7 +173,7 @@ class PopulationBuilder:
             self._seen_seeds.add(seed)
 
         ranked = rank_episode_cutoff_radii(
-            episode.states, episode.pointer_actions
+            episode.states, episode.pointer_actions, episode.binary_actions
         )
         self._moments["centroid"].update(ranked["centroid_ranked_radii"])
         self._moments["heading"].update(ranked["heading_ranked_radii"])
@@ -224,6 +236,7 @@ class PopulationBuilder:
             velocity_entropy_mean=velocity_entropy_mean,
             velocity_entropy_std=velocity_entropy_std,
             max_metric_errors=dict(self._max_errors),
+            pointer_bundle=bool(self._pointer_bundle),
         )
 
 
@@ -923,7 +936,9 @@ def generate_standard_figure_sets(
                 "max_metric_validation_errors": dict(
                     aggregate.max_metric_errors
                 ),
-                "pointer_mask_mismatch_count": 0,
+                "pointer_mask_mismatch_count": (
+                    0 if aggregate.pointer_bundle else None
+                ),
                 "population_std_ddof": 0,
                 "derived_path": (
                     derived_dir

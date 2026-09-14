@@ -23,6 +23,11 @@ import numpy as np
 
 FULL_SCHEMA_VERSION = "main-c2-full-2.0"
 
+# Bundles whose policy emits the (N,N) mask directly have no pointer action, so
+# they carry their own schema id and required-key set.  A bundle never mixes the
+# two ids: one run = one checkpoint = one id.
+MASK_SCHEMA_VERSION = "main-c2-full-mask-2.0"
+
 SCALAR_SERIES = (
     "s_ent", "v_ent", "s_ent_env", "v_ent_env", "phi", "reward",
     "nnd_mean", "nnd_max", "min_pair", "diam", "radius",
@@ -34,6 +39,12 @@ FULL_REQUIRED = (
 )
 
 CANONICAL_FULL_REQUIRED = FULL_REQUIRED + SCALAR_SERIES + (
+    "deg_agents", "t_fire", "success", "J",
+)
+
+MASK_REQUIRED = ("agent_states", "binary_actions", "control_inputs")
+
+CANONICAL_MASK_REQUIRED = MASK_REQUIRED + SCALAR_SERIES + (
     "deg_agents", "t_fire", "success", "J",
 )
 
@@ -155,7 +166,7 @@ def load_episode(path: os.PathLike) -> EpisodeView:
     raw = _copy_archive(path)
     schema = _scalar_string(raw.get("schema_version", "main-sparse-1"))
 
-    if schema == FULL_SCHEMA_VERSION:
+    if schema in (FULL_SCHEMA_VERSION, MASK_SCHEMA_VERSION):
         data = dict(raw)
         data["meta"] = _json_object(data.get("meta", {}))
         return EpisodeView(data, path, schema, legacy=False, full=True)
@@ -332,31 +343,38 @@ def validate_full_episode(view: EpisodeView, expected: Optional[Dict[str, Any]] 
     """Structurally validate canonical or historical full trajectories."""
     if not view.full:
         raise ValueError(f"full trajectory fields are unavailable: {view.path}")
-    required = (CANONICAL_FULL_REQUIRED
-                if view.schema_version == FULL_SCHEMA_VERSION else FULL_REQUIRED)
+    if view.schema_version == FULL_SCHEMA_VERSION:
+        required = CANONICAL_FULL_REQUIRED
+    elif view.schema_version == MASK_SCHEMA_VERSION:
+        required = CANONICAL_MASK_REQUIRED
+    else:
+        required = FULL_REQUIRED
     missing = [key for key in required if key not in view]
     if missing:
         raise ValueError(f"missing full episode keys {missing}: {view.path}")
 
     states = np.asarray(view["agent_states"])
-    pointer = np.asarray(view["pointer_actions"])
+    pointer = None if "pointer_actions" not in view else np.asarray(
+        view["pointer_actions"])
     binary = np.asarray(view["binary_actions"])
     controls = np.asarray(view["control_inputs"])
     if states.ndim != 3 or states.shape[2] != 5:
         raise ValueError(f"agent_states must have shape (T+1,N,5): {view.path}")
     horizon, n_agents = states.shape[0] - 1, states.shape[1]
     expected_shapes = {
-        "pointer_actions": (horizon, n_agents),
         "binary_actions": (horizon, n_agents, n_agents),
         "control_inputs": (horizon, n_agents),
     }
+    if pointer is not None:
+        expected_shapes["pointer_actions"] = (horizon, n_agents)
     for key, shape in expected_shapes.items():
         if np.asarray(view[key]).shape != shape:
             raise ValueError(f"{key} shape {np.asarray(view[key]).shape} != {shape}")
-    if not np.issubdtype(pointer.dtype, np.integer):
-        raise ValueError(f"pointer actions must have integer dtype: {view.path}")
-    if np.any(pointer < 0) or np.any(pointer >= n_agents):
-        raise ValueError(f"pointer action out of range: {view.path}")
+    if pointer is not None:
+        if not np.issubdtype(pointer.dtype, np.integer):
+            raise ValueError(f"pointer actions must have integer dtype: {view.path}")
+        if np.any(pointer < 0) or np.any(pointer >= n_agents):
+            raise ValueError(f"pointer action out of range: {view.path}")
     if binary.dtype != np.bool_ and not np.all((binary == 0) | (binary == 1)):
         raise ValueError(f"binary actions must contain only 0/1: {view.path}")
     if not np.all(np.diagonal(binary.astype(bool), axis1=1, axis2=2)):
@@ -365,7 +383,8 @@ def validate_full_episode(view: EpisodeView, expected: Optional[Dict[str, Any]] 
         if not np.isfinite(np.asarray(view[key])).all():
             raise ValueError(f"non-finite {key}: {view.path}")
 
-    series_names = SCALAR_SERIES if view.schema_version == FULL_SCHEMA_VERSION else (
+    canonical = view.schema_version in (FULL_SCHEMA_VERSION, MASK_SCHEMA_VERSION)
+    series_names = SCALAR_SERIES if canonical else (
         "s_ent", "v_ent", "phi", "n_comp_r0", "reward")
     for name in series_names:
         if name in view and np.asarray(view[name]).shape != (horizon + 1,):
@@ -376,7 +395,7 @@ def validate_full_episode(view: EpisodeView, expected: Optional[Dict[str, Any]] 
     for name in ("t_fire", "success", "J"):
         if name in view and np.asarray(view[name]).shape != ():
             raise ValueError(f"{name} must be scalar: {view.path}")
-    if view.schema_version == FULL_SCHEMA_VERSION:
+    if canonical:
         for name in ("s_ent", "v_ent", "phi", "nnd_mean", "nnd_max",
                      "min_pair", "diam", "radius", "n_comp_r0"):
             if not np.isfinite(np.asarray(view[name])).all():

@@ -173,6 +173,9 @@ def _parser():
               "legacy/noncanonical input"),
     )
     radii.add_argument("--animation", action="store_true")
+    radii.add_argument(
+        "--policy", default="deterministic",
+        help="policy directory to read (default: %(default)s)")
 
     heatmaps = subparsers.add_parser("heatmaps", help="ranked population cutoff heatmaps")
     heatmaps.add_argument("--run", required=True, type=Path)
@@ -184,6 +187,9 @@ def _parser():
     )
     heatmaps.add_argument("--t-max-seconds", type=float)
     heatmaps.add_argument("--with-entropies", action="store_true")
+    heatmaps.add_argument(
+        "--policy", default="deterministic",
+        help="policy directory to read (default: %(default)s)")
 
     control = subparsers.add_parser("control-effort", help="main-C2 L1/L2 effort analysis")
     control.add_argument("--run", required=True, type=Path)
@@ -305,7 +311,7 @@ def main(argv=None):
     if args.command == "radii":
         from eval.analysis.radii import run_from_bundle
         outputs = run_from_bundle(args.run, args.n, args.seed, output=args.output,
-                                  animation=args.animation)
+                                  animation=args.animation, policy=args.policy)
         print(json.dumps(outputs, indent=2, sort_keys=True, allow_nan=False))
         return 0
 
@@ -313,7 +319,8 @@ def main(argv=None):
         from eval.analysis.heatmaps import run_from_bundle
         outputs = run_from_bundle(args.run, output=args.output,
                                   t_max_seconds=args.t_max_seconds,
-                                  with_entropies=args.with_entropies)
+                                  with_entropies=args.with_entropies,
+                                  policy=args.policy)
         print(json.dumps(outputs, indent=2, sort_keys=True, allow_nan=False))
         return 0
 

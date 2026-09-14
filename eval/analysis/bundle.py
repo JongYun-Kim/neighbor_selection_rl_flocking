@@ -147,6 +147,26 @@ def deterministic_paths(paths: Sequence[Path]) -> List[Path]:
     return explicit if explicit else list(paths)
 
 
+def policy_paths(paths: Sequence[Path], policy: str) -> List[Path]:
+    """Keep only the episodes written under one policy directory.
+
+    ``deterministic`` delegates to :func:`deterministic_paths` so the default
+    analysis path, including its historical-layout fallback, is unchanged.
+    """
+
+    name = str(policy).strip().lower()
+    if name in {"deterministic", ""}:
+        return deterministic_paths(paths)
+    selected = [
+        path for path in paths if path.parent.name.strip().lower() == name
+    ]
+    if not selected:
+        raise ValueError(
+            "no episodes under a {!r} policy directory".format(policy)
+        )
+    return selected
+
+
 def _walk_named(value: Any, names: set) -> Iterable[Any]:
     if isinstance(value, Mapping):
         for key, child in value.items():

@@ -7,11 +7,11 @@ from typing import Any, Dict, Optional
 from eval.artifacts import atomic_write_json
 
 from .bundle import (
-    deterministic_paths,
     discover_bundle,
     expected_episode_count,
     manifest_agent_counts,
     manifest_number,
+    policy_paths,
     resolve_analysis_output,
 )
 from .population import aggregate_paths, generate_standard_figure_sets
@@ -33,6 +33,7 @@ def _default_view_directory(
     root: Path,
     t_max_seconds: Optional[float],
     with_entropies: bool,
+    policy: str = "deterministic",
 ) -> Path:
     if t_max_seconds is None:
         name = "full"
@@ -41,6 +42,9 @@ def _default_view_directory(
         name = "tmax{}s".format(time_text)
     if with_entropies:
         name += "_with_entropies"
+    # The default policy keeps its historical directory name unchanged.
+    if str(policy).strip().lower() != "deterministic":
+        name += "_{}".format(str(policy).strip().lower())
     return root / "analysis" / "ranked_heatmaps" / name
 
 
@@ -49,6 +53,7 @@ def run_from_bundle(
     output=None,
     t_max_seconds: Optional[float] = None,
     with_entropies: bool = False,
+    policy: str = "deterministic",
 ) -> Dict[str, Any]:
     """Create one four-figure N20/N40 set from a population bundle.
 
@@ -66,7 +71,8 @@ def run_from_bundle(
                 sorted(available)
             )
         )
-    paths = deterministic_paths(paths)
+    deterministic = str(policy).strip().lower() == "deterministic"
+    paths = policy_paths(paths, policy)
     paths = _canonical_n_paths(paths, requested)
     dt = manifest_number(source_manifest, ("dt", "dt_seconds"))
     if dt is None:
@@ -79,7 +85,7 @@ def run_from_bundle(
         num_agents=requested,
         dt_override=dt,
         expected_count=expected_episode_count(source_manifest),
-        require_deterministic=True,
+        require_deterministic=deterministic,
         reject_duplicate_seeds=True,
     )
 
@@ -101,7 +107,7 @@ def run_from_bundle(
         views = ("detail",)
 
     default_output = _default_view_directory(
-        root, t_max_seconds, with_entropies
+        root, t_max_seconds, with_entropies, policy
     )
     output_dir = resolve_analysis_output(
         root,

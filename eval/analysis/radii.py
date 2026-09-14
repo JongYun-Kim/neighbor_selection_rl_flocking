@@ -8,7 +8,7 @@ from typing import Any, Dict
 from eval.artifacts import atomic_write_json
 
 from .bundle import (
-    deterministic_paths, discover_bundle, manifest_number,
+    discover_bundle, manifest_number, policy_paths,
     resolve_analysis_output,
 )
 from .core import require_deterministic_episode, resolve_dt, validate_pointer_mask
@@ -45,35 +45,39 @@ def run_from_bundle(
     seed,
     output=None,
     animation: bool = False,
+    policy: str = "deterministic",
 ) -> Dict[str, Any]:
     """Render first/middle/final previews and optionally an MP4 for one seed."""
 
     n_agents = int(n)
     seed = int(seed)
+    deterministic = str(policy).strip().lower() == "deterministic"
     root, source_manifest, paths = discover_bundle(run)
-    paths = _candidate_paths(deterministic_paths(paths), n_agents, seed)
+    paths = _candidate_paths(policy_paths(paths, policy), n_agents, seed)
     matches = []
     for path in paths:
         episode = load_episode_data(path, require_metrics=False)
         if _metadata_matches(episode, n_agents, seed):
-            try:
-                require_deterministic_episode(episode)
-            except ValueError:
-                # Candidate discovery may deliberately fall back to metadata
-                # for non-standard layouts.  A stochastic sibling with the
-                # same N/seed is not an analysis failure; it is not a match.
-                continue
+            if deterministic:
+                try:
+                    require_deterministic_episode(episode)
+                except ValueError:
+                    # Candidate discovery may deliberately fall back to
+                    # metadata for non-standard layouts.  A stochastic sibling
+                    # with the same N/seed is not an analysis failure; it is
+                    # not a match.
+                    continue
             matches.append(episode)
     if not matches:
         raise FileNotFoundError(
-            "no deterministic N={} seed={} episode in {}".format(
-                n_agents, seed, root
+            "no {} N={} seed={} episode in {}".format(
+                policy, n_agents, seed, root
             )
         )
     if len(matches) != 1:
         raise ValueError(
-            "found {} deterministic N={} seed={} episodes; bundle is ambiguous".format(
-                len(matches), n_agents, seed
+            "found {} {} N={} seed={} episodes; bundle is ambiguous".format(
+                len(matches), policy, n_agents, seed
             )
         )
     episode = matches[0]
@@ -87,15 +91,22 @@ def run_from_bundle(
         source_manifest, ("dt", "dt_seconds"), num_agents=n_agents
     )
     dt = resolve_dt(episode, dt_override)
-    mask_report = validate_pointer_mask(episode)
+    mask_report = (
+        None if episode.pointer_actions is None
+        else validate_pointer_mask(episode)
+    )
     arrays = derive_radius_arrays(episode)
+    # The default policy keeps its historical directory name unchanged.
+    leaf = "N{}_seed_{:05d}".format(n_agents, seed)
+    if not deterministic:
+        leaf += "_{}".format(str(policy).strip().lower())
     output_dir = resolve_analysis_output(
         root,
         source_manifest,
         output,
         "analysis",
         "radii",
-        "N{}_seed_{:05d}".format(n_agents, seed),
+        leaf,
     )
     previews = render_previews(
         episode, arrays, output_dir / "previews", dt=dt

@@ -28,7 +28,7 @@ RADIUS_SCHEMA_VERSION = "dynamic-k-single-episode-radius-v1"
 
 def derive_radius_arrays(episode: EpisodeData) -> Dict[str, np.ndarray]:
     ranked = rank_episode_cutoff_radii(
-        episode.states, episode.pointer_actions
+        episode.states, episode.pointer_actions, episode.binary_actions
     )
     centered = centered_positions(episode.states)
     external = episode.binary_actions.copy()
@@ -148,7 +148,10 @@ def draw_radius_frame(
     swarm_centroid = np.mean(absolute_position, axis=0)
     headings = episode.states[time_index, :, 4]
     radii = arrays["cutoff_radii"][time_index]
-    pointer = episode.pointer_actions[time_index]
+    pointer = (
+        None if episode.pointer_actions is None
+        else episode.pointer_actions[time_index]
+    )
     selected_k = arrays["selected_k"][time_index]
     colors = style["agent_colors"]
 
@@ -177,16 +180,17 @@ def draw_radius_frame(
             alpha=0.45,
             zorder=2,
         )
-        target = int(pointer[agent])
-        if target != agent:
-            spatial_axis.plot(
-                [position[agent, 0], position[target, 0]],
-                [position[agent, 1], position[target, 1]],
-                color=colors[agent],
-                linewidth=0.85 if num_agents <= 20 else 0.55,
-                alpha=0.65,
-                zorder=3,
-            )
+        if pointer is not None:
+            target = int(pointer[agent])
+            if target != agent:
+                spatial_axis.plot(
+                    [position[agent, 0], position[target, 0]],
+                    [position[agent, 1], position[target, 1]],
+                    color=colors[agent],
+                    linewidth=0.85 if num_agents <= 20 else 0.55,
+                    alpha=0.65,
+                    zorder=3,
+                )
     arrow_length = float(style["arrow_length"])
     spatial_axis.quiver(
         position[:, 0],
@@ -211,7 +215,10 @@ def draw_radius_frame(
         linewidths=0.55,
         zorder=6,
     )
-    self_agents = np.flatnonzero(pointer == np.arange(num_agents))
+    self_agents = (
+        np.zeros(0, dtype=int) if pointer is None
+        else np.flatnonzero(pointer == np.arange(num_agents))
+    )
     if self_agents.size:
         spatial_axis.scatter(
             position[self_agents, 0],
@@ -243,7 +250,10 @@ def draw_radius_frame(
     spatial_axis.set_ylabel("y - swarm centroid [m]")
     spatial_axis.set_title(
         "All-agent pointer cutoff circles\n"
-        "circle/line color = ego agent; × = self pointer",
+        "circle/line color = ego agent; × = self pointer"
+        if pointer is not None else
+        "All-agent selection-radius circles\n"
+        "circle color = ego agent",
         fontsize=11,
     )
     spatial_axis.grid(alpha=0.18, linewidth=0.55)
@@ -251,7 +261,7 @@ def draw_radius_frame(
         0.012,
         0.985,
         "step={}/{} | t={:.2f} s | phi={:.4f}\n"
-        "radius mean/median/range={:.1f}/{:.1f}/{:.1f}–{:.1f} m | self={}/{}\n"
+        "radius mean/median/range={:.1f}/{:.1f}/{:.1f}–{:.1f} m{}\n"
         "absolute centroid=({:.1f}, {:.1f}) m".format(
             time_index,
             episode.horizon - 1,
@@ -261,8 +271,8 @@ def draw_radius_frame(
             float(np.median(radii)),
             float(np.min(radii)),
             float(np.max(radii)),
-            self_agents.size,
-            num_agents,
+            "" if pointer is None
+            else " | self={}/{}".format(self_agents.size, num_agents),
             swarm_centroid[0],
             swarm_centroid[1],
         ),
@@ -592,7 +602,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     episode = load_episode_data(args.episode, require_metrics=False)
     if not args.allow_nondeterministic:
         require_deterministic_episode(episode)
-    mask_report = validate_pointer_mask(episode)
+    mask_report = (
+        None if episode.pointer_actions is None
+        else validate_pointer_mask(episode)
+    )
     dt = resolve_dt(episode, args.dt)
     arrays = derive_radius_arrays(episode)
     output_dir = args.output_dir.resolve()
