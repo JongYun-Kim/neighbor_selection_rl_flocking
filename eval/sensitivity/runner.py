@@ -8,7 +8,7 @@ import multiprocessing as mp
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Mapping
+from typing import Dict, List, Mapping, Optional
 
 import numpy as np
 
@@ -20,7 +20,8 @@ from eval.artifacts import (
     run_fingerprint,
 )
 from eval.common import _n_components, _pairwise_dist, build_config
-from eval.policies import DynamicKNNInferencePolicy
+from eval.policies import (BinaryInferencePolicy, checkpoint_env_overrides,
+                          DynamicKNNInferencePolicy)
 from eval.provenance import git_snapshot, runtime_snapshot
 from eval.protocol import MAIN_C2_V1, judge_episode_c2
 from eval.run_support import (
@@ -53,7 +54,8 @@ EVIDENCE_FIELDS = STATE_SERIES + STEP_SERIES + ("initial_agent_states",)
 
 
 def build_sensitivity_env_config(setting: SensitivitySetting, macro_horizon: int,
-                                 obs_position_scale: str):
+                                 obs_position_scale: str,
+                                 env_overrides: Optional[Dict[str, object]] = None):
     """Resolve one setting onto the maintained fixed-horizon eval config."""
     physics_horizon = int(macro_horizon) * int(setting.substeps_per_policy_interval)
     cfg = build_config(
@@ -61,10 +63,14 @@ def build_sensitivity_env_config(setting: SensitivitySetting, macro_horizon: int
         max_steps=physics_horizon,
         initial_position_bound=float(setting.initial_position_bound),
     )
-    cfg.env.action_type = "dynamic_k_nn"
-    cfg.env.evaluation_diagnostics = True
-    cfg.env.expose_aux_target = False
-    cfg.env.expose_global_stats = False
+    if env_overrides is None:
+        cfg.env.action_type = "dynamic_k_nn"
+        cfg.env.evaluation_diagnostics = True
+        cfg.env.expose_aux_target = False
+        cfg.env.expose_global_stats = False
+    else:
+        for key, value in env_overrides.items():
+            setattr(cfg.env, key, value)
     cfg.env.obs_position_scale = str(obs_position_scale)
     cfg.env.termination_mode = "legacy"
     cfg.env.reward_mode = "legacy"
@@ -388,7 +394,8 @@ def _run_job(job: Dict[str, object]) -> List[Dict[str, object]]:
     policy = str(job["policy"])
     horizon = int(job["horizon"])
     cfg = build_sensitivity_env_config(
-        setting, horizon, str(job["obs_position_scale"]))
+        setting, horizon, str(job["obs_position_scale"]),
+        job.get("env_overrides"))
     config_hash = run_fingerprint(cfg.dict())
     if config_hash != job["config_sha256"]:
         raise ValueError("effective sensitivity config differs from manifest")
@@ -437,8 +444,13 @@ def _run_job(job: Dict[str, object]) -> List[Dict[str, object]]:
             observations.append(observation)
             accumulators.append(SparseAccumulator(env, setting, horizon))
         if policy != "pure_acs" and inference is None:
-            inference = DynamicKNNInferencePolicy(
-                Path(job["checkpoint"]), envs[0], device=str(job["device"]))
+            inference = (
+                DynamicKNNInferencePolicy(
+                    Path(job["checkpoint"]), envs[0], device=str(job["device"]))
+                if cfg.env.action_type == "dynamic_k_nn"
+                else BinaryInferencePolicy(
+                    Path(job["checkpoint"]), envs[0], device=str(job["device"]))
+            )
         generators = None
         if policy == "learned_stochastic":
             generators = [
@@ -459,10 +471,15 @@ def _run_job(job: Dict[str, object]) -> List[Dict[str, object]]:
             masks = [[] for _ in batch]
             controls = [[] for _ in batch]
             for _ in range(int(setting.substeps_per_policy_interval)):
-                actions = (
-                    np.stack([pure_acs_pointer(env) for env in envs])
-                    if policy == "pure_acs" else held_actions
-                )
+                actions = held_actions
+                if policy == "pure_acs":
+                    actions = (
+                        np.stack([pure_acs_pointer(env) for env in envs])
+                        if cfg.env.action_type == "dynamic_k_nn"
+                        else np.ones(
+                            (len(envs), int(setting.num_agents),
+                             int(setting.num_agents)), dtype=np.int8)
+                    )
                 next_observations = []
                 for index, env in enumerate(envs):
                     next_obs, reward, done, info = env.step(actions[index])
@@ -500,13 +517,15 @@ def _run_job(job: Dict[str, object]) -> List[Dict[str, object]]:
 
 def build_manifest(run_id: str, checkpoint: os.PathLike,
                    config: ResolvedSensitivityConfig, device: str,
-                   batch_size: int):
+                   batch_size: int,
+                   env_overrides: Optional[Dict[str, object]] = None):
     checkpoint = Path(checkpoint).expanduser().resolve()
     checkpoint_info = checkpoint_identity(checkpoint)
     config_hashes = {
         setting.setting_id: run_fingerprint(build_sensitivity_env_config(
             setting, config.horizon,
-            str(checkpoint_info["obs_position_scale"])).dict())
+            str(checkpoint_info["obs_position_scale"]),
+            env_overrides).dict())
         for setting in config.settings
     }
     git = git_snapshot(Path(__file__).resolve().parents[2])
@@ -523,6 +542,7 @@ def build_manifest(run_id: str, checkpoint: os.PathLike,
         "checkpoint_state_sha256": checkpoint_info["state_file_sha256"],
         "checkpoint_config_sha256": checkpoint_info["config_file_sha256"],
         "effective_config_sha256_by_setting": config_hashes,
+        "env_overrides": env_overrides,
         "git_commit": git["commit"],
         "git_dirty": git["dirty"],
         "git_dirty_diff_sha256": git["dirty_diff_sha256"],
@@ -578,7 +598,11 @@ def run_sensitivity(checkpoint: os.PathLike, bundle: os.PathLike, run_id: str,
         raise ValueError("unsupported sensitivity policy")
     bundle = Path(bundle).expanduser().resolve()
     checkpoint = Path(checkpoint).expanduser().resolve()
-    manifest = build_manifest(run_id, checkpoint, config, str(device), int(batch_size))
+    with (checkpoint.parent / "params.json").open(encoding="utf-8") as stream:
+        params = json.load(stream)
+    env_overrides = checkpoint_env_overrides(params)
+    manifest = build_manifest(run_id, checkpoint, config, str(device),
+                              int(batch_size), env_overrides)
     manifest_path = bundle / "manifest.json"
     if manifest_path.is_file():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -612,6 +636,7 @@ def run_sensitivity(checkpoint: os.PathLike, bundle: os.PathLike, run_id: str,
                 "obs_position_scale": manifest["checkpoint"]["obs_position_scale"],
                 "config_sha256": manifest["spec"][
                     "effective_config_sha256_by_setting"][setting.setting_id],
+                "env_overrides": manifest["spec"]["env_overrides"],
                 "setting": setting,
                 "policy": policy,
                 "seeds": list(config.seeds),
