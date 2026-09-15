@@ -54,6 +54,11 @@ def paired_dj(pol, ref):
     if n < 6:
         return dict(n_pair=n, med=np.nan, wilcox_p=np.nan, worse=np.nan,
                     sign_p=np.nan)
+    if not np.any(d != 0):
+        # identical arms (e.g. knn12 == pure_acs at N=10): both tests are
+        # undefined on an all-zero vector, so report the pairing without them
+        return dict(n_pair=n, med=0.0, wilcox_p=np.nan, worse=0,
+                    sign_p=np.nan)
     return dict(n_pair=n, med=float(np.median(d)),
                 wilcox_p=float(stats.wilcoxon(d).pvalue),
                 worse=int((d > 0).sum()),

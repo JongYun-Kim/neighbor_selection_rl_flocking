@@ -457,6 +457,20 @@ DISCOVERY = {
 
 
 # --------------------------------------------------------------- one episode
+def post_c2_min_pair(min_pair: np.ndarray, t_fire: int, success: int) -> float:
+    """Minimum pairwise distance from the C2 declaration onward.
+
+    ``min_pair`` has one entry per state (T+1); ``t_fire`` is the state index
+    at which the judge first declared C2.  NaN when the episode never reached
+    C2, so this column is success-gated by construction (the full-horizon
+    ``min_pair_min`` is not).
+    """
+    if int(success) != 1 or int(t_fire) < 0:
+        return float("nan")
+    tail = np.asarray(min_pair, dtype=np.float64)[int(t_fire):]
+    return float(np.nanmin(tail)) if tail.size else float("nan")
+
+
 def process_episode(spec: Dict[str, object]) -> Dict[str, object]:
     path = Path(spec["path"])
     kind = str(spec["kind"])
@@ -488,6 +502,9 @@ def process_episode(spec: Dict[str, object]) -> Dict[str, object]:
         "t_fire": int(judgment["t_fire"]), "success": int(judgment["success"]),
         "J": judgment["J"],
         "min_pair_min": float(np.nanmin(payload["min_pair"])),
+        "min_pair_min_post_c2": post_c2_min_pair(
+            payload["min_pair"], int(judgment["t_fire"]),
+            int(judgment["success"])),
         "r0": r0, "dt": dt, "speed": speed, "u_max_used": u_max,
     }
     row.update(window_summary(arrays, degrees, num_agents))
@@ -573,7 +590,7 @@ def _check_effort_reference(row, reference) -> object:
 def write_summary(rows: List[Dict[str, object]], path: Path) -> Path:
     columns = ["kind", "arm", "run_id", "num_agents", "policy", "seed",
                "source_path", "t_fire", "success", "J", "min_pair_min",
-               "r0", "dt", "speed", "u_max_used"]
+               "min_pair_min_post_c2", "r0", "dt", "speed", "u_max_used"]
     for window in WINDOW_NAMES:
         columns.extend(f"{name}_{window}" for name in R_COLUMNS)
     columns.extend(EFFORT_COLUMNS)
@@ -631,10 +648,48 @@ def _median_iqr(values: Sequence[float]) -> Tuple[float, float, float, int]:
     return float(np.median(finite)), float(q1), float(q3), int(finite.size)
 
 
+# Identifiers and physical constants are not metrics; ``success`` is a rate,
+# not a quantity with a meaningful median.
+IDENTITY_COLUMNS = ("kind", "arm", "run_id", "policy", "seed", "source_path",
+                    "num_agents", "success")
+CONSTANT_COLUMNS = ("r0", "dt", "speed", "u_max_used")
+# Columns that only mean something when the episode reached C2.  The judge
+# stores ``t_fire = -1`` for failures and every collection lane filters on
+# ``success == 1`` before summarising it; the table path must do the same.
+SUCCESS_GATED_COLUMNS = ("t_fire",)
+
+
 def _table_metrics(rows: List[Dict[str, str]]) -> List[str]:
-    skip = set(CHECK_COLUMNS) | {
-        "kind", "arm", "run_id", "policy", "seed", "source_path"}
+    skip = set(CHECK_COLUMNS) | set(IDENTITY_COLUMNS) | set(CONSTANT_COLUMNS)
     return [name for name in rows[0] if name not in skip]
+
+
+def _cell_value(row: Dict[str, str], column: str) -> float:
+    if column in SUCCESS_GATED_COLUMNS and str(row.get("success", "")) != "1":
+        return float("nan")
+    try:
+        return float(row.get(column, ""))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _arm_cells(rows: Sequence[Dict[str, str]]) -> List[Tuple[str, str]]:
+    return sorted({(str(row.get("policy", "")), str(row.get("num_agents", "")))
+                   for row in rows})
+
+
+def _require_single_cell(name: str, rows: Sequence[Dict[str, str]]) -> None:
+    """One arm must be one (policy, N) cell; pooling cells hides structure.
+
+    A population sweep mixes rank-faithful arms (R4 == 0 by definition) with
+    learned ones, so a pooled median collapses toward the smallest positive
+    value.  Slice the summary CSV per (policy, num_agents) before passing it.
+    """
+    cells = _arm_cells(rows)
+    if len(cells) > 1:
+        raise ValueError(
+            f"arm {name!r} spans {len(cells)} (policy, num_agents) cells "
+            f"{cells}; slice the summary CSV to one cell per arm")
 
 
 def run_table(arms: Dict[str, Path], pairs: Sequence[Tuple[str, str]],
@@ -643,17 +698,15 @@ def run_table(arms: Dict[str, Path], pairs: Sequence[Tuple[str, str]],
     for name, rows in loaded.items():
         if not rows:
             raise ValueError(f"arm {name} has no rows")
+    for name, rows in loaded.items():
+        _require_single_cell(name, rows)
     metrics = _table_metrics(next(iter(loaded.values())))
 
     def numeric(rows, column):
-        out_values = []
-        for row in rows:
-            text = row.get(column, "")
-            try:
-                out_values.append(float(text))
-            except (TypeError, ValueError):
-                out_values.append(float("nan"))
-        return out_values
+        return [_cell_value(row, column) for row in rows]
+
+    def pair_key(row):
+        return (str(row.get("num_agents", "")), str(row["seed"]))
 
     records = []
     for arm, rows in loaded.items():
@@ -664,20 +717,26 @@ def run_table(arms: Dict[str, Path], pairs: Sequence[Tuple[str, str]],
                 "median": median, "q1": q1, "q3": q3, "iqr": q3 - q1,
                 "n": count,
             })
+    matched = {}
     for left, right in pairs:
         if left not in loaded or right not in loaded:
             raise ValueError(f"unknown arm in pair {left}:{right}")
-        left_by_seed = {row["seed"]: row for row in loaded[left]}
-        right_by_seed = {row["seed"]: row for row in loaded[right]}
-        shared = sorted(set(left_by_seed) & set(right_by_seed))
+        left_by_key = {pair_key(row): row for row in loaded[left]}
+        right_by_key = {pair_key(row): row for row in loaded[right]}
+        if len(left_by_key) != len(loaded[left]) or (
+                len(right_by_key) != len(loaded[right])):
+            raise ValueError(
+                f"pair {left}:{right}: duplicate (num_agents, seed) rows")
+        shared = sorted(set(left_by_key) & set(right_by_key))
+        if not shared:
+            raise ValueError(
+                f"pair {left}:{right}: no shared (num_agents, seed) keys "
+                f"({len(left_by_key)} vs {len(right_by_key)} rows)")
+        matched[f"{left}:{right}"] = len(shared)
         for metric in metrics:
-            deltas = []
-            for seed in shared:
-                try:
-                    deltas.append(float(left_by_seed[seed][metric])
-                                  - float(right_by_seed[seed][metric]))
-                except (TypeError, ValueError, KeyError):
-                    deltas.append(float("nan"))
+            deltas = [_cell_value(left_by_key[key], metric)
+                      - _cell_value(right_by_key[key], metric)
+                      for key in shared]
             median, q1, q3, count = _median_iqr(deltas)
             records.append({
                 "comparison": "paired_difference", "arm": left, "other": right,
@@ -692,24 +751,39 @@ def run_table(arms: Dict[str, Path], pairs: Sequence[Tuple[str, str]],
             "iqr", "n"])
         writer.writeheader()
         writer.writerows(records)
-    return {"out": str(out), "rows": len(records), "arms": sorted(loaded)}
+    return {"out": str(out), "rows": len(records), "arms": sorted(loaded),
+            "cells": {name: _arm_cells(rows)[0] for name, rows in loaded.items()},
+            "matched_pairs": matched}
 
 
 # ----------------------------------------------------------------- figures
 def _rank_curves(summary_path: Path, window: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Pool every derived episode of one arm into P_hat and P_ref."""
+    """Pool the derived episodes listed in one arm CSV into P_hat and P_ref.
+
+    Only the ``.rmetrics.npz`` files whose ``source_path`` appears in the CSV
+    are used, so a (policy, N) slice of a summary selects exactly its own
+    episodes.  The slice must live inside the derived tree (the search root is
+    the CSV's directory); a slice that matches nothing is an error rather than
+    a silently missing curve, and mixed N cannot be pooled.
+    """
+    summary_path = Path(summary_path)
+    wanted = {row["source_path"] for row in _csv_rows(summary_path)}
     root = summary_path.parent
     selected, reference, agents, count = None, None, None, 0
     for path in sorted(root.rglob("*.rmetrics.npz")):
         with np.load(path, allow_pickle=True) as handle:
+            meta = json.loads(str(handle["meta"]))
+            if meta.get("source_path") not in wanted:
+                continue
             sel = np.asarray(handle["r5_sel_count"], dtype=np.float64)
             ref = np.asarray(handle["r5_ref_count"], dtype=np.float64)
-            meta = json.loads(str(handle["meta"]))
         num_agents = int(meta["num_agents"])
         if agents is None:
             agents = num_agents
         elif agents != num_agents:
-            continue
+            raise ValueError(
+                f"{summary_path}: episodes mix num_agents {agents} and "
+                f"{num_agents}; rank curves need one N per arm")
         window_slice = window_slices(int(meta["horizon"]))[window]
         sel = sel[window_slice].sum(0) / (
             (window_slice.stop - window_slice.start) * num_agents)
@@ -719,7 +793,9 @@ def _rank_curves(summary_path: Path, window: str) -> Tuple[np.ndarray, np.ndarra
         reference = ref if reference is None else reference + ref
         count += 1
     if selected is None:
-        return np.zeros(0), np.zeros(0)
+        raise ValueError(
+            f"{summary_path}: none of its {len(wanted)} episodes has a derived "
+            f".rmetrics.npz under {root}; write slices inside the derived tree")
     return selected / count, reference / count
 
 
@@ -747,8 +823,6 @@ def run_figures(arms: Dict[str, Path], out: Path) -> Dict[str, object]:
     for axis, window in zip(axes, ("full", "ss")):
         for name, path in arms.items():
             selected, reference = _rank_curves(Path(path), window)
-            if selected.size == 0:
-                continue
             ranks = np.arange(1, selected.size + 1)
             line, = axis.plot(ranks, selected, marker="o", markersize=3,
                               label=f"{name}")
