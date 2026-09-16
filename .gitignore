@@ -1,4 +1,4 @@
-# Python
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *$py.class
@@ -20,44 +20,85 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
+# ---- Virtual environments ----
 venv/
 env/
 ENV/
 .venv
 
-# IDEs
+# ---- IDEs ----
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
+# ---- OS ----
 .DS_Store
 Thumbs.db
 
-# Jupyter Notebook
+# ---- Jupyter ----
 .ipynb_checkpoints
 
-# Testing
+# ---- Testing ----
 .pytest_cache/
 .coverage
 htmlcov/
-test_results/
 
-# Temporary files
+# ---- Run artifacts (regenerable / heavy) ----
+# Every trainer and every eval CLI defaults here: train_unified.py's
+# `local_dir` ($TRAINING_RESULTS_DIR or repo_path("test_results")), eval's
+# DEFAULT_ROOT test_results/evaluation/, eval_c2.py's test_results/eval/,
+# run_knn_refs.py's test_results/knnref/, and docker/run_{train,eval}.sh.
+# Checkpoints (~11 MB each, never pruned) and the .training_complete marker
+# land inside it too, as does a trial's wandb/ state.
+test_results/
+# $ARTIFACT_ROOT when eval runs bare-metal instead of through docker; the
+# layout documented in docs/EVALUATION.md puts it at <repo>/artifacts.
+artifacts/
+# legacy/evaluate_checkpoint.py writes ./evaluate_results, CWD-relative.
+evaluate_results/
+# RLlib's DEFAULT_RESULTS_DIR fallback, used by the --smoke paths that build
+# an Algorithm with no logger_creator. Normally lands in ~/ray_results.
+ray_results/
+# Opt-in W&B (WANDB_ENABLED=1). Real writes nest under a trial dir; this is
+# a guard for runs started from the repo root.
+wandb/
+
+# ---- Per-study artifacts ----
+# The six studies that generate output carry their own .gitignore; these
+# rules cover new study directories. `data/*` rather than `data/`: git cannot
+# re-include a file whose parent directory is excluded, and
+# studies/acs-robust-r3-stress/.gitignore whitelists two files under data/.
+studies/*/data/*
+studies/*/figs/
+studies/*/logs/
+
+# ---- Heavy artifact formats ----
+# Safety net for --outdir / --output-dir / --csv-out pointed somewhere other
+# than the artifact root. Deliberately NOT *.png (figures/ and studies/*/
+# handle it, and README images stay committable) and NOT *.pkl / *.json /
+# *.csv, which would swallow the versioned checkpoints/ tree.
+*.npz
+*.parquet
+*.mp4
+*.gif
+
+# ---- Logs and temporaries ----
 *.log
 *.tmp
 .cache/
+# Atomic-write leftovers, present only after a crash: eval/artifacts.py
+# stages `.tmp-<name>.<hex>` files and `.tmp-checkpoint.<hex>` directories,
+# and the analysis writers stage `.<name>.tmp.png` / `.<name>.tmp.mp4`.
+.tmp-*
+.*.tmp.*
 
-# Run artifacts (regenerable / heavy)
-ray_results/
-test_results/
-evaluate_results/
+# ---- Secrets ----
+wandb_api_key*
 
-# Canonical checkpoint copies under checkpoints/ are intentionally versioned.
+# ---- Canonical checkpoint copies under checkpoints/ are intentionally versioned. ----
 
-# Local-only docs (untracked by choice)
+# ---- Local-only docs (untracked by choice) ----
 CLAUDE.md
 REPORT_hardtopk_distaux_KO.md

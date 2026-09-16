@@ -81,19 +81,23 @@ and `legacy/` still hardcode `/workspace/...` — keep the repo at `/workspace`
 
 ### What a clone does *not* carry
 
-Everything needed to **train and evaluate from scratch** is tracked; two kinds
-of binary artifact are not, and are handed over out of band:
+Everything needed to **train and evaluate from scratch** is tracked, and so are
+the two canonical policy packages — `checkpoints/dynamic_k_nn_best/` and
+`checkpoints/full_pointer_nn_best_260830/`, ~25 MB together — which a fresh
+clone can load directly. What a clone does not get is the *historical*
+checkpoint archives, which were never committed and are handed over out of band:
 
 | artifact | why it is missing | what breaks without it |
 |---|---|---|
-| `checkpoints/**` (~69 MB) | `.gitignore` rule `checkpoints/*`; only `PROVENANCE.md` is tracked | nothing in training; you cannot re-measure the published policies, and `tools/check_ck848_parity.py` cannot run |
+| the historical `checkpoints/` packages — π_E, π_R, A it40 and `legacy_distance_pointer_260818/` (~69 MB) | never committed; handed over out of band, not a `.gitignore` rule | nothing in training; you cannot re-measure those policies, and `tools/check_ck848_parity.py` cannot run |
 | `test_results/**` | gitignored run artifacts | nothing — this is where your own runs land |
 
 **The ck848 parity reference.** `tools/check_ck848_parity.py` diffs a resolved
 `dknn` config against the archived `params.json` of the ck848 run. That file is
-~2.6 KB but lives inside the untracked `checkpoints/` tree, so on a fresh clone
-the gate exits with `FileNotFoundError`. Restore it by unpacking the handed-over
-ck848 directory at the path `PROVENANCE.md` records:
+~2.6 KB but lives inside the `legacy_distance_pointer_260818/` package, which is
+not in the repo, so on a fresh clone the gate exits with `FileNotFoundError`.
+Restore it by unpacking the handed-over ck848 directory at the path
+`PROVENANCE.md` records:
 
 ```
 checkpoints/legacy_distance_pointer_260818/
