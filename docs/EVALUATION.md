@@ -427,3 +427,14 @@ recorded artifacts; they do not rerun the policy or alter the source bundle's
 episode data. With the default output location, full, time-limited, and
 time-limited-plus-entropy heatmaps use separate view directories under
 `analysis/ranked_heatmaps/`, so all three four-figure sets can coexist.
+
+Heatmap colour scales are chosen per (N, ranking) from the maximum over the
+displayed window, so a busier N=40 panel no longer stretches the N=20 scale.
+`--vmax` pins a scale instead: one bare value, or repeated `N:RANKING=VALUE`
+(`--vmax 20:centroid_distance=280 --vmax 40:centroid_distance=310`), which is
+how arms rendered in separate runs are put on a common scale.
+`--vmax-floor-seconds` is the robust opt-in — it takes the maximum from that
+time onward, rounded up to `--vmax-round` (default 10 m), and clips the start
+transient on purpose. Any figure whose data exceeds its scale gets the
+colorbar's extension arrow, and every figure entry in `manifest.json` records
+the `color_vmax` actually used.

@@ -21,7 +21,14 @@ from eval.analysis.core import (
 )
 from eval.analysis.bundle import deterministic_paths
 from eval.analysis.heatmaps import run_from_bundle as run_heatmaps
-from eval.analysis.population import OnlineMoments, PopulationBuilder, figure_filename
+from eval.analysis.population import (
+    OnlineMoments,
+    PopulationAggregate,
+    PopulationBuilder,
+    _apply_vmax_override,
+    _scoped_vmax,
+    figure_filename,
+)
 from eval.analysis.radius import frame_indices
 from eval.analysis.radii import _candidate_paths, run_from_bundle as run_radii
 from eval.artifacts import FULL_SCHEMA_VERSION
@@ -96,6 +103,36 @@ def write_episode(
         phi=episode["phi"],
         s_ent=episode["s_ent"],
         v_ent=episode["v_ent"],
+    )
+
+
+def scale_aggregate(num_agents, centroid_peak, heading_peak, horizon=4, dt=0.5):
+    """Aggregate whose two ranked views have known, distinct maxima."""
+    centroid = np.ones((horizon, num_agents), dtype=np.float64)
+    centroid[-1, -1] = centroid_peak
+    heading = np.ones((horizon, num_agents), dtype=np.float64)
+    heading[-1, -1] = heading_peak
+    entropy = np.zeros(horizon + 1, dtype=np.float64)
+    return PopulationAggregate(
+        num_agents=num_agents,
+        episode_count=1,
+        horizon=horizon,
+        dt=dt,
+        seeds=(0,),
+        source_paths=(),
+        centroid_mean=centroid,
+        centroid_std=centroid,
+        heading_mean=heading,
+        heading_std=heading,
+        centroid_metric_mean=centroid,
+        centroid_metric_std=centroid,
+        heading_metric_mean=heading,
+        heading_metric_std=heading,
+        position_entropy_mean=entropy,
+        position_entropy_std=entropy,
+        velocity_entropy_mean=entropy,
+        velocity_entropy_std=entropy,
+        max_metric_errors={},
     )
 
 
@@ -225,6 +262,35 @@ class StreamingPopulationTest(unittest.TestCase):
 
     def test_frame_indices_always_include_final_action(self):
         self.assertEqual(frame_indices(0, 11, 4), [0, 4, 8, 10])
+
+
+class ColorScaleTest(unittest.TestCase):
+    def test_scoped_vmax_keeps_the_n20_scale_off_the_n40_maximum(self):
+        aggregates = [
+            scale_aggregate(20, 261.4, 201.7),
+            scale_aggregate(40, 282.8, 224.1),
+        ]
+        scoped = _scoped_vmax(aggregates, None, "mean")
+        self.assertGreater(len(set(scoped.values())), 1)
+        self.assertLess(
+            scoped[(20, "centroid_distance")], scoped[(40, "centroid_distance")]
+        )
+        self.assertAlmostEqual(scoped[(20, "centroid_distance")], 261.4)
+        self.assertAlmostEqual(scoped[(20, "mean_heading_difference")], 201.7)
+
+    def test_vmax_mapping_pins_only_the_keys_it_names(self):
+        aggregates = [
+            scale_aggregate(20, 261.4, 201.7),
+            scale_aggregate(40, 282.8, 224.1),
+        ]
+        scoped = _apply_vmax_override(
+            _scoped_vmax(aggregates, None, "mean"),
+            {(20, "centroid_distance"): 301.3},
+        )
+        self.assertAlmostEqual(scoped[(20, "centroid_distance")], 301.3)
+        self.assertAlmostEqual(scoped[(20, "mean_heading_difference")], 201.7)
+        self.assertAlmostEqual(scoped[(40, "centroid_distance")], 282.8)
+        self.assertAlmostEqual(scoped[(40, "mean_heading_difference")], 224.1)
 
 
 class BundlePathSelectionTest(unittest.TestCase):

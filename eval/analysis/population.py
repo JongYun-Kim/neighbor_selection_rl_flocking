@@ -4,9 +4,10 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import math
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -25,6 +26,19 @@ from .core import (
 
 ANALYSIS_SCHEMA_VERSION = "dynamic-k-ranked-population-v1"
 RANKING_TYPES = ("centroid_distance", "mean_heading_difference")
+POLICY_FIGURE_LABELS = {
+    "deterministic": "deterministic RL",
+    "stochastic": "stochastic RL",
+    "pure_acs": "pure ACS",
+    "knn12": "fixed k=12 NN",
+}
+
+
+def arm_label(policy: Optional[str]) -> str:
+    """Human label for a figure title; unknown arms degrade to their own name."""
+
+    name = str(policy or "deterministic").strip().lower()
+    return POLICY_FIGURE_LABELS.get(name, name.replace("_", " "))
 
 
 class OnlineMoments:
@@ -515,6 +529,7 @@ def render_heatmap(
     dpi: int = 180,
     max_time_seconds: Optional[float] = None,
     statistic: str = "mean",
+    label: str = "deterministic RL",
 ) -> Dict[str, Any]:
     import matplotlib
 
@@ -543,7 +558,10 @@ def render_heatmap(
         shading="flat",
         rasterized=True,
     )
-    colorbar = figure.colorbar(mesh, ax=axis, pad=0.025)
+    clipped = bool(np.max(values) > float(shared_vmax) * (1.0 + 1e-9))
+    colorbar = figure.colorbar(
+        mesh, ax=axis, pad=0.025, extend="max" if clipped else "neither"
+    )
     colorbar.set_label(
         "population mean cutoff radius [m]"
         if statistic == "mean"
@@ -556,9 +574,10 @@ def render_heatmap(
     axis.set_xlabel(xlabel)
     axis.set_ylabel("physical time [s]")
     axis.set_title(
-        "N={} deterministic RL — population {} cutoff radius{}\n"
+        "N={} {} — population {} cutoff radius{}\n"
         "{}; rank each episode/time before aggregation".format(
             aggregate.num_agents,
+            label,
             statistic,
             " (0–{:g} s view)".format(max_time)
             if max_time_seconds is not None
@@ -597,6 +616,8 @@ def render_heatmap(
         "height_time_cells": display_steps,
         "width_rank_cells": aggregate.num_agents,
         "display_max_time_seconds": max_time,
+        "color_vmax": float(shared_vmax),
+        "color_scale_clipped": clipped,
     }
 
 
@@ -632,6 +653,7 @@ def render_heatmap_with_entropies(
     max_time_seconds: float = 30.0,
     dpi: int = 180,
     statistic: str = "mean",
+    label: str = "deterministic RL",
 ) -> Dict[str, Any]:
     """Render two left-facing entropy panels beside the unchanged heatmap."""
 
@@ -731,7 +753,10 @@ def render_heatmap_with_entropies(
         shading="flat",
         rasterized=True,
     )
-    colorbar = figure.colorbar(mesh, cax=colorbar_axis)
+    clipped = bool(np.max(values) > float(shared_vmax) * (1.0 + 1e-9))
+    colorbar = figure.colorbar(
+        mesh, cax=colorbar_axis, extend="max" if clipped else "neither"
+    )
     colorbar.set_label(
         "population mean cutoff radius [m]"
         if statistic == "mean"
@@ -758,9 +783,9 @@ def render_heatmap_with_entropies(
         bbox={"facecolor": "black", "alpha": 0.52, "edgecolor": "none"},
     )
     figure.suptitle(
-        "N={} deterministic RL — population cutoff {} (0–{:g} s)\n"
+        "N={} {} — population cutoff {} (0–{:g} s)\n"
         "velocity/position entropy means + {} cutoff radius".format(
-            aggregate.num_agents, statistic, max_time, short_name
+            aggregate.num_agents, label, statistic, max_time, short_name
         ),
         fontsize=12,
         y=0.965,
@@ -787,25 +812,70 @@ def render_heatmap_with_entropies(
         "height_time_cells": display_steps,
         "width_rank_cells": aggregate.num_agents,
         "display_max_time_seconds": max_time,
+        "color_vmax": float(shared_vmax),
+        "color_scale_clipped": clipped,
     }
 
 
-def _shared_vmax(
+def _scoped_vmax(
     aggregates: Sequence[PopulationAggregate],
     max_time_seconds: Optional[float],
     statistic: str,
-) -> float:
-    maxima = []
+    *,
+    floor_seconds: Optional[float] = None,
+    round_to: float = 10.0,
+) -> Dict[Tuple[int, str], float]:
+    """One vmax per (N, ranking).  N=40 no longer drives the N=20 scale.
+
+    ``floor_seconds`` restricts the max to t >= floor and rounds the result up
+    to ``round_to``; the transient start then exceeds the scale on purpose and
+    the colorbar is drawn with extend="max".
+    """
+
+    scoped: Dict[Tuple[int, str], float] = {}
     for aggregate in aggregates:
         steps = time_window_steps(
             aggregate.horizon, aggregate.dt, max_time_seconds
         )
         for ranking in RANKING_TYPES:
-            maxima.append(
-                float(np.max(aggregate.cutoff_values(ranking, statistic)[:steps]))
-            )
-    maximum = max(maxima)
-    return max(1e-12, maximum)
+            window = aggregate.cutoff_values(ranking, statistic)[:steps]
+            if floor_seconds is not None:
+                start = time_window_steps(
+                    aggregate.horizon, aggregate.dt, float(floor_seconds)
+                )
+                if start < steps:
+                    window = window[start:]
+            value = float(np.max(window))
+            if floor_seconds is not None and round_to > 0:
+                value = math.ceil(value / round_to) * round_to
+            scoped[(aggregate.num_agents, ranking)] = max(1e-12, value)
+    return scoped
+
+
+def _apply_vmax_override(
+    scoped: Dict[Tuple[int, str], float],
+    vmax: Union[float, Mapping[Tuple[int, str], float], None],
+) -> Dict[Tuple[int, str], float]:
+    """Pin the colour scale explicitly; a mapping leaves untouched keys auto.
+
+    A bare float deliberately applies to every (N, ranking) so cross-arm pins
+    stay a one-token option, but callers comparing N=20 against N=40 should
+    pass the mapping form instead of reintroducing one swarm-wide maximum.
+    """
+
+    if vmax is None:
+        return scoped
+    if isinstance(vmax, Mapping):
+        for key, value in vmax.items():
+            num_agents, ranking = int(key[0]), str(key[1])
+            if ranking not in RANKING_TYPES:
+                raise ValueError("unknown ranking type {!r}".format(ranking))
+            # Keys for populations this call does not render are ignored so one
+            # token set can drive several runs.
+            if (num_agents, ranking) in scoped:
+                scoped[(num_agents, ranking)] = float(value)
+        return scoped
+    return {key: float(vmax) for key in scoped}
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
@@ -821,6 +891,10 @@ def generate_standard_figure_sets(
     statistic: str = "mean",
     dpi: int = 180,
     source_root: Optional[Path] = None,
+    policy: str = "deterministic",
+    vmax: Union[float, Mapping[Tuple[int, str], float], None] = None,
+    vmax_floor_seconds: Optional[float] = None,
+    vmax_round_to: float = 10.0,
 ) -> Dict[str, Any]:
     """Generate four N/ranking figures per requested view.
 
@@ -834,6 +908,7 @@ def generate_standard_figure_sets(
     if unknown:
         raise ValueError("unknown figure views: {}".format(sorted(unknown)))
     output_dir = Path(output_dir).resolve()
+    figure_label = arm_label(policy)
     figure_dir = output_dir / "figures"
     derived_dir = output_dir / "derived"
     ordered = [aggregates[key] for key in sorted(aggregates)]
@@ -865,7 +940,16 @@ def generate_standard_figure_sets(
     if "entropy" in views:
         view_specs.append(("entropy", float(detail_seconds), True))
     for view_name, max_time, with_entropy in view_specs:
-        vmax = _shared_vmax(ordered, max_time, statistic)
+        scoped = _apply_vmax_override(
+            _scoped_vmax(
+                ordered,
+                max_time,
+                statistic,
+                floor_seconds=vmax_floor_seconds,
+                round_to=vmax_round_to,
+            ),
+            vmax,
+        )
         limits = (
             entropy_axis_limits(ordered, float(max_time)) if with_entropy else None
         )
@@ -879,26 +963,29 @@ def generate_standard_figure_sets(
                     statistic=statistic,
                 )
                 output = figure_dir / filename
+                view_vmax = scoped[(aggregate.num_agents, ranking_type)]
                 if with_entropy:
                     record = render_heatmap_with_entropies(
                         aggregate,
                         ranking_type,
                         output,
-                        shared_vmax=vmax,
+                        shared_vmax=view_vmax,
                         entropy_limits=limits,
                         max_time_seconds=float(max_time),
                         dpi=dpi,
                         statistic=statistic,
+                        label=figure_label,
                     )
                 else:
                     record = render_heatmap(
                         aggregate,
                         ranking_type,
                         output,
-                        shared_vmax=vmax,
+                        shared_vmax=view_vmax,
                         dpi=dpi,
                         max_time_seconds=max_time,
                         statistic=statistic,
+                        label=figure_label,
                     )
                 record["view"] = view_name
                 record["path"] = output.relative_to(output_dir).as_posix()
@@ -908,6 +995,8 @@ def generate_standard_figure_sets(
         "schema_version": ANALYSIS_SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "statistic_rendered": statistic,
+        "policy": str(policy),
+        "arm_label": figure_label,
         "detail_seconds": float(detail_seconds),
         "views": list(views),
         "analysis_output_root": ".",

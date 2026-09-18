@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 from eval.artifacts import atomic_write_json
 
@@ -54,12 +54,18 @@ def run_from_bundle(
     t_max_seconds: Optional[float] = None,
     with_entropies: bool = False,
     policy: str = "deterministic",
+    vmax: Union[float, Mapping[Tuple[int, str], float], None] = None,
+    vmax_floor_seconds: Optional[float] = None,
+    vmax_round_to: float = 10.0,
 ) -> Dict[str, Any]:
     """Create one four-figure N20/N40 set from a population bundle.
 
     The rank axis is recomputed within every episode and action time before the
     online population moments are updated.  Mean and episode-standard-deviation
     arrays are always saved; the rendered heatmaps show the requested mean view.
+
+    The colour scale is per-(N, ranking) by default; ``vmax`` pins it instead,
+    which is how one scale is shared across separately rendered arms.
     """
 
     root, source_manifest, paths = discover_bundle(run)
@@ -122,6 +128,10 @@ def run_from_bundle(
         views=views,
         statistic="mean",
         source_root=root,
+        policy=policy,
+        vmax=vmax,
+        vmax_floor_seconds=vmax_floor_seconds,
+        vmax_round_to=vmax_round_to,
     )
     source_bundle = Path(os.path.relpath(root, output_dir)).as_posix()
     result.update(

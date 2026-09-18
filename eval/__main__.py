@@ -64,6 +64,47 @@ def _comma_strings(value):
     return values
 
 
+def _vmax_token(value):
+    """One --vmax token: a bare float, or a scoped ``N:RANKING=VALUE``."""
+    text = str(value).strip()
+    if "=" not in text:
+        try:
+            return float(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                "expected a float or N:RANKING=VALUE, got {!r}".format(value))
+    scope, _, number = text.partition("=")
+    agents, separator, ranking = scope.partition(":")
+    try:
+        if not separator:
+            raise ValueError(scope)
+        return (int(agents), ranking.strip(), float(number))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "scoped --vmax must look like 20:centroid_distance=280") from error
+
+
+def _resolve_vmax(tokens, ranking_types):
+    """Collapse --vmax tokens into the scalar-or-mapping form the API takes."""
+    if not tokens:
+        return None
+    scalars = [item for item in tokens if not isinstance(item, tuple)]
+    scoped = [item for item in tokens if isinstance(item, tuple)]
+    if scalars and scoped:
+        raise ValueError("--vmax takes either one bare value or scoped tokens")
+    if scalars:
+        if len(scalars) != 1:
+            raise ValueError("--vmax accepts at most one bare value")
+        return scalars[0]
+    mapping = {}
+    for num_agents, ranking, value in scoped:
+        if ranking not in ranking_types:
+            raise ValueError("unknown --vmax ranking {!r}; expected one of {}".format(
+                ranking, ", ".join(ranking_types)))
+        mapping[(num_agents, ranking)] = value
+    return mapping
+
+
 def _parser():
     parser = argparse.ArgumentParser(
         prog="python -m eval",
@@ -229,6 +270,17 @@ def _parser():
     heatmaps.add_argument(
         "--policy", default="deterministic",
         help="policy directory to read (default: %(default)s)")
+    heatmaps.add_argument(
+        "--vmax", action="append", type=_vmax_token, metavar="V|N:RANKING=V",
+        help=("pin the colour scale instead of auto-scaling per (N, ranking); "
+              "repeat N:RANKING=VALUE to share one scale across several arms"))
+    heatmaps.add_argument(
+        "--vmax-floor-seconds", type=float, metavar="T",
+        help=("robust opt-in: scale to the maximum over t>=T, clipping the "
+              "start transient on purpose"))
+    heatmaps.add_argument(
+        "--vmax-round", type=float, default=10.0, metavar="M",
+        help="round a --vmax-floor-seconds scale up to this multiple (default: %(default)s)")
 
     control = subparsers.add_parser("control-effort", help="main-C2 L1/L2 effort analysis")
     control.add_argument("--run", required=True, type=Path)
@@ -378,10 +430,17 @@ def main(argv=None):
 
     if args.command == "heatmaps":
         from eval.analysis.heatmaps import run_from_bundle
+        from eval.analysis.population import RANKING_TYPES
+        try:
+            vmax = _resolve_vmax(args.vmax, RANKING_TYPES)
+        except ValueError as error:
+            parser.error(str(error))
         outputs = run_from_bundle(args.run, output=args.output,
                                   t_max_seconds=args.t_max_seconds,
                                   with_entropies=args.with_entropies,
-                                  policy=args.policy)
+                                  policy=args.policy, vmax=vmax,
+                                  vmax_floor_seconds=args.vmax_floor_seconds,
+                                  vmax_round_to=args.vmax_round)
         print(json.dumps(outputs, indent=2, sort_keys=True, allow_nan=False))
         return 0
 
