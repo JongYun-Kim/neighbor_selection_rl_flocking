@@ -225,6 +225,42 @@ class RankCurves(unittest.TestCase):
                 rmetrics._rank_curves(csv_path, "full")
 
 
+class ArmStyle(unittest.TestCase):
+    def test_every_report_arm_name_lands_on_its_palette_family(self):
+        expected = {
+            "dknn": "#2E7D32", "full_NN": "#C62828", "k12": "#B07A06",
+            "k19": "#37474F", "ACS_FC": "#37474F", "dknn_sto": "#2E7D32",
+            "fnn_acs": "#37474F", "fnn_knn12": "#B07A06",
+        }
+        for name, color in expected.items():
+            style = rmetrics.arm_style(name)
+            self.assertEqual(style["color"], color, name)
+            self.assertEqual(style["suffix"], "", name)
+
+    def test_only_stochastic_decoding_is_dashed(self):
+        for name in ("dknn", "full_NN", "k19", "fnn_acs", "fnn_knn12"):
+            self.assertEqual(rmetrics.arm_style(name)["linestyle"], "-", name)
+        for name in ("dknn_sto", "fnn_sto", "stochastic_N20"):
+            self.assertEqual(rmetrics.arm_style(name)["linestyle"], "--", name)
+
+    def test_an_unmapped_arm_is_grey_and_says_so(self):
+        style = rmetrics.arm_style("mystery")
+        self.assertEqual(style["color"], rmetrics.UNMAPPED_ARM_COLOR)
+        self.assertEqual(style["family"], "unmapped")
+        self.assertEqual(style["suffix"], " (unmapped)")
+
+
+class EffortPoints(unittest.TestCase):
+    def test_episodes_that_never_reached_c2_are_counted_not_dropped(self):
+        rows = [_row("det", 20, seed) for seed in range(5)]
+        for row in rows[:2]:
+            row.update({"t_fire": "-1", "l2_energy_to_c2": "nan"})
+        t_fire, energy, drawn, total = rmetrics._effort_points(rows)
+        self.assertEqual((drawn, total), (3, 5))
+        self.assertEqual(t_fire.size, 3)
+        self.assertTrue(np.isfinite(energy).all())
+
+
 class RunFigures(unittest.TestCase):
     def test_writes_the_four_figures_from_sliced_arms(self):
         with tempfile.TemporaryDirectory() as tmp:

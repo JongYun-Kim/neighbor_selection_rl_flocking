@@ -62,6 +62,25 @@ KINDS = ("population", "c2", "knnref")
 ARRAY_KEYS = ("r1", "r1_norm", "r3", "r4", "r5_sel_count", "r5_ref_count",
               "r6_asym", "r6_nonrecip")
 WINDOW_NAMES = ("early", "ss", "full")
+# Report palette (_sessions/S6_handoff.md §5.2).  k19 / knnref / ACS-FC and
+# pure ACS are one visual family.
+ARM_COLORS = {
+    "dknn":     "#2E7D32",   # green
+    "full_nn":  "#C62828",   # red
+    "pure_acs": "#37474F",   # dark slate
+    "knn12":    "#B07A06",   # amber
+}
+# Documented fallback: an arm whose name matches no family is drawn neutral grey
+# and tagged "(unmapped)" in the legend, rather than borrowing a palette colour.
+UNMAPPED_ARM_COLOR = "#9E9E9E"
+# First match wins, tested as a substring of the lower-cased arm name.  "acs"
+# precedes "dknn"/"fnn" so dknn_acs and fnn_acs both land on pure ACS.
+_ARM_PATTERNS = (
+    ("acs", "pure_acs"), ("k19", "pure_acs"), ("knnref", "pure_acs"),
+    ("knn12", "knn12"), ("k12", "knn12"),
+    ("dknn", "dknn"),
+    ("full_nn", "full_nn"), ("fullnn", "full_nn"), ("fnn", "full_nn"),
+)
 R_COLUMNS = ("r1", "r1_norm", "k", "k_norm", "r3", "r4", "r6_asym",
              "r6_nonrecip", "k0_rate")
 EFFORT_COLUMNS = (
@@ -82,6 +101,17 @@ CHECK_COLUMNS = ("check_deg_match", "check_r1_ptr_bitwise", "check_r3_one",
 def boundary_tolerance(radius: np.ndarray) -> np.ndarray:
     """Distance within which the env's own cutoff decision is not resolvable."""
     return BOUNDARY_ATOL + BOUNDARY_RTOL * np.abs(np.asarray(radius))
+
+
+def arm_style(name: str) -> Dict[str, object]:
+    """Report-palette colour plus the decoding linestyle for one arm label."""
+    key = str(name).lower()
+    family = next((fam for token, fam in _ARM_PATTERNS if token in key), None)
+    stochastic = "_sto" in key or "stochastic" in key
+    return {"color": ARM_COLORS.get(family, UNMAPPED_ARM_COLOR),
+            "linestyle": "--" if stochastic else "-",
+            "family": family or "unmapped",
+            "suffix": "" if family else " (unmapped)"}
 
 
 def _nanmean(values) -> float:
@@ -757,6 +787,32 @@ def run_table(arms: Dict[str, Path], pairs: Sequence[Tuple[str, str]],
 
 
 # ----------------------------------------------------------------- figures
+def _numeric_column(rows: Sequence[Dict[str, str]], column: str) -> np.ndarray:
+    """One summary column as floats; a missing or unparsable cell becomes NaN."""
+    values = []
+    for row in rows:
+        try:
+            values.append(float(row[column]))
+        except (TypeError, ValueError, KeyError):
+            values.append(float("nan"))
+    return np.asarray(values, dtype=np.float64)
+
+
+def _effort_points(rows: Sequence[Dict[str, str]]) -> Tuple[
+        np.ndarray, np.ndarray, int, int]:
+    """Plottable (t_fire, effort) pairs for one arm, with drawn/total counts.
+
+    ``t_fire < 0`` marks an episode that never reached C2; its effort-to-C2
+    columns are the string ``nan`` by construction, so the point cannot be
+    placed at all.  The counts let the caller say so instead of letting
+    matplotlib drop the vertex without a visual hint.
+    """
+    t_fire = _numeric_column(rows, "t_fire")
+    energy = _numeric_column(rows, "l2_energy_to_c2")
+    shown = np.isfinite(t_fire) & (t_fire >= 0) & np.isfinite(energy)
+    return t_fire[shown], energy[shown], int(shown.sum()), len(rows)
+
+
 def _rank_curves(summary_path: Path, window: str) -> Tuple[np.ndarray, np.ndarray]:
     """Pool the derived episodes listed in one arm CSV into P_hat and P_ref.
 
@@ -809,25 +865,20 @@ def run_figures(arms: Dict[str, Path], out: Path) -> Dict[str, object]:
     loaded = {name: _csv_rows(path) for name, path in arms.items()}
     written = []
 
-    def numeric(rows, column):
-        values = []
-        for row in rows:
-            try:
-                values.append(float(row[column]))
-            except (TypeError, ValueError, KeyError):
-                values.append(float("nan"))
-        return np.asarray(values, dtype=np.float64)
-
     # (1) rank-selection curves against the same-k nearest projection
     figure, axes = plt.subplots(1, 2, figsize=(11, 4))
     for axis, window in zip(axes, ("full", "ss")):
         for name, path in arms.items():
             selected, reference = _rank_curves(Path(path), window)
             ranks = np.arange(1, selected.size + 1)
-            line, = axis.plot(ranks, selected, marker="o", markersize=3,
-                              label=f"{name}")
-            axis.plot(ranks, reference, linestyle="--", linewidth=1,
-                      color=line.get_color(), label=f"{name} (same-k nearest)")
+            style = arm_style(name)
+            axis.plot(ranks, selected, marker="o", markersize=3,
+                      color=style["color"], linestyle=style["linestyle"],
+                      label=f"{name}{style['suffix']}")
+            # Dashed is reserved for stochastic decoding, so the same-k
+            # reference is dotted.
+            axis.plot(ranks, reference, linestyle=":", linewidth=1,
+                      color=style["color"], label=f"{name} (same-k nearest)")
         axis.set_title(f"R5 selection probability by distance rank ({window})")
         axis.set_xlabel("distance rank m")
         axis.set_ylabel("P(select)")
@@ -845,7 +896,7 @@ def run_figures(arms: Dict[str, Path], out: Path) -> Dict[str, object]:
         data, labels = [], []
         for name, rows in loaded.items():
             for window in ("early", "ss"):
-                values = numeric(rows, f"{metric}_{window}")
+                values = _numeric_column(rows, f"{metric}_{window}")
                 data.append(values[np.isfinite(values)])
                 labels.append(f"{name}\n{window}")
         axis.boxplot(data, tick_labels=labels)
@@ -859,11 +910,19 @@ def run_figures(arms: Dict[str, Path], out: Path) -> Dict[str, object]:
 
     # (3) effort against time to C2
     figure, axis = plt.subplots(figsize=(6, 4.5))
+    omitted = []
     for name, rows in loaded.items():
-        axis.scatter(numeric(rows, "t_fire"), numeric(rows, "l2_energy_to_c2"),
-                     s=12, label=name, alpha=0.7)
+        t_fire, energy, drawn, total = _effort_points(rows)
+        axis.scatter(t_fire, energy, s=12, alpha=0.7,
+                     color=arm_style(name)["color"],
+                     label=f"{name} (n={drawn}/{total})")
+        if drawn != total:
+            omitted.append(f"{name} {total - drawn}")
     axis.set_xlabel("t_fire (state index)")
     axis.set_ylabel("l2_energy_to_c2 (rad^2/s)")
+    axis.set_title("effort to C2 vs time to C2" + (
+        "\nnot plotted, never reached C2: " + ", ".join(omitted)
+        if omitted else "\nall episodes reached C2"))
     axis.legend(fontsize=8)
     figure.tight_layout()
     path = out / "effort_vs_t_fire.png"
@@ -876,12 +935,28 @@ def run_figures(arms: Dict[str, Path], out: Path) -> Dict[str, object]:
     names = list(loaded)
     width = 0.8 / max(1, len(WINDOW_NAMES))
     for index, window in enumerate(WINDOW_NAMES):
-        values = [float(np.nanmean(numeric(loaded[name], f"k0_rate_{window}")))
+        values = [_nanmean(_numeric_column(loaded[name], f"k0_rate_{window}"))
                   for name in names]
-        axis.bar(np.arange(len(names)) + index * width, values, width=width,
-                 label=window)
+        bars = axis.bar(np.arange(len(names)) + index * width, values,
+                        width=width, label=window)
+        # A true zero draws no rectangle and reads as missing data.  Put a
+        # visible rule on the baseline where the bar has zero height, and
+        # label every bar so "0" is stated, not inferred from an empty slot.
+        for rect, value in zip(bars, values):
+            if np.isfinite(value) and value == 0.0:
+                axis.hlines(0.0, rect.get_x(), rect.get_x() + rect.get_width(),
+                            color=rect.get_facecolor(), linewidth=2.5,
+                            zorder=3)
+        axis.bar_label(
+            bars, fontsize=6, padding=2, rotation=90,
+            labels=["n/a" if not np.isfinite(v)
+                    else ("0" if v == 0.0 else f"{v:.2g}") for v in values])
+    axis.margins(y=0.22)              # headroom for the rotated labels
+    axis.set_ylim(bottom=0.0)
     axis.set_xticks(np.arange(len(names)) + width)
     axis.set_xticklabels(names, fontsize=8)
+    for label, name in zip(axis.get_xticklabels(), names):
+        label.set_color(arm_style(name)["color"])
     axis.set_ylabel("k = 0 rate (mean over episodes)")
     axis.legend(fontsize=8)
     figure.tight_layout()
