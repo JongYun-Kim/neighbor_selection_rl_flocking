@@ -24,6 +24,14 @@ from .population import load_episode_data
 
 
 RADIUS_SCHEMA_VERSION = "dynamic-k-single-episode-radius-v1"
+# Sentence-initial arm names for the figure title; unknown arms use their
+# own metadata name so a new policy is never silently mislabelled.
+POLICY_TITLE_LABELS = {
+    "deterministic": "Deterministic",
+    "stochastic": "Stochastic",
+    "pure_acs": "Pure ACS",
+    "knn12": "Fixed k=12 NN",
+}
 
 
 def derive_radius_arrays(episode: EpisodeData) -> Dict[str, np.ndarray]:
@@ -423,8 +431,11 @@ def draw_radius_frame(
     )
 
     figure.suptitle(
-        "Deterministic dynamic-k neighbor radius — N={}, seed={}".format(
-            num_agents, episode.meta.get("seed", "?")
+        "{} {} — N={}, seed={}".format(
+            _policy_title_label(episode),
+            _radius_kind(episode),
+            num_agents,
+            episode.meta.get("seed", "?"),
         ),
         fontsize=14,
     )
@@ -440,7 +451,40 @@ def _sha256(path: Path) -> str:
 
 def _output_stem(episode: EpisodeData) -> str:
     seed = episode.meta.get("seed", "unknown")
-    return "N{}_seed{}_deterministic_radius".format(episode.num_agents, seed)
+    return "N{}_seed{}_{}_radius".format(
+        episode.num_agents, seed, _episode_policy(episode)
+    )
+
+
+def _episode_policy(episode: EpisodeData) -> str:
+    """Arm name from episode metadata; mirrors aggregate_paths' key order.
+
+    Episodes with no policy metadata keep the historical ``deterministic``
+    stem so existing outputs and their recorded hashes stay valid.
+    """
+
+    value = episode.meta.get("action_mode", episode.meta.get("policy"))
+    name = str(value).strip().lower() if value is not None else ""
+    name = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in name)
+    return name or "deterministic"
+
+
+def _policy_title_label(episode: EpisodeData) -> str:
+    name = _episode_policy(episode)
+    return POLICY_TITLE_LABELS.get(name, name.replace("_", " "))
+
+
+def _radius_kind(episode: EpisodeData) -> str:
+    """Name the radius the figure actually shows.
+
+    Only pointer episodes carry the policy's own k decision.  Without pointer
+    actions ``core`` falls back to ``compute_mask_radii``, the realized
+    farthest-selected-neighbour distance, which is not a dynamic-k quantity.
+    """
+
+    if episode.pointer_actions is None:
+        return "neighbor radius"
+    return "dynamic-k neighbor radius"
 
 
 def render_previews(
