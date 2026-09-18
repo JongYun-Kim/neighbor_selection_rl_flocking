@@ -222,6 +222,8 @@ python -m eval.run_knn_refs --k 12,19 --L 250 --seeds 1500-1999 --workers 15
 # arm-pair matrix: Wilson CI, exact McNemar, CVaR10, co-success paired dJ
 python -m eval.pair_judge --seeds 1500-1999 \
     --arm pol=lp848 --arm k12=knnref:12,250,20
+# post-hoc L1/peak/saturation effort of a sensitivity bundle (L2 is not stored)
+python -m eval.analysis.sensitivity_effort compute --run <bundle>/sensitivity
 ```
 
 The legacy per-module commands above write to the gitignored

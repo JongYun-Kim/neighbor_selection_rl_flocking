@@ -40,6 +40,13 @@ def _device(value):
     return value
 
 
+def _arm_path(value):
+    """One NAME=PATH arm, parsed by the helper eval.rmetrics already uses."""
+    from eval.rmetrics import _arm_argument
+
+    return _arm_argument(value)
+
+
 def _comma_ints(value):
     try:
         values = [int(item) for item in value.split(",")]
@@ -148,6 +155,34 @@ def _parser():
         "plot", help="write the four core sensitivity tables and figures")
     sensitivity_plot.add_argument("--run", required=True, type=Path)
     sensitivity_plot.add_argument("--output", type=Path)
+
+    sensitivity_effort = sensitivity_commands.add_parser(
+        "effort",
+        help="post-hoc L1/peak/saturation control effort (L2 is not recorded)")
+    sensitivity_effort.add_argument("--run", required=True, type=Path)
+    sensitivity_effort.add_argument(
+        "--output", type=Path,
+        help="default: <bundle>/analysis/control_effort")
+    sensitivity_effort.add_argument(
+        "--arm", help="arm label recorded on every emitted row")
+    sensitivity_effort.add_argument(
+        "--no-event-aligned", action="store_true",
+        help="skip event_aligned.csv")
+    sensitivity_effort.add_argument("--settings", type=_comma_strings)
+    sensitivity_effort.add_argument("--policies", type=_comma_strings)
+    sensitivity_effort.add_argument("--seeds", help="A-B or comma list")
+
+    sensitivity_effort_compare = sensitivity_commands.add_parser(
+        "effort-compare",
+        help=("put sensitivity effort arms side by side; different checkpoints "
+              "are never a controlled comparison"))
+    sensitivity_effort_compare.add_argument(
+        "--arm", action="append", required=True, type=_arm_path,
+        metavar="NAME=EPISODE_SENSITIVITY_EFFORT_CSV")
+    sensitivity_effort_compare.add_argument("--out", required=True, type=Path)
+    sensitivity_effort_compare.add_argument(
+        "--exclude-setting", action="append", metavar="SETTING_ID",
+        help="repeatable; replaces the default exclusion list")
 
     validate = subparsers.add_parser("validate", help="validate a population bundle")
     validate.add_argument("--run", required=True, type=Path)
@@ -297,6 +332,28 @@ def main(argv=None):
         if args.sensitivity_command == "plot":
             from eval.sensitivity.analysis import write_analysis
             result = write_analysis(args.run, output_dir=args.output)
+            print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+            return 0
+        if args.sensitivity_command == "effort":
+            from eval.analysis.sensitivity_effort import run_from_bundle
+            from eval.run_support import parse_int_range
+            try:
+                seeds = parse_int_range(args.seeds) if args.seeds else None
+            except ValueError as error:
+                parser.error(str(error))
+            result = run_from_bundle(
+                args.run, output=args.output, arm=args.arm,
+                event_aligned=not args.no_event_aligned,
+                settings=args.settings, policies=args.policies, seeds=seeds)
+            print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+            return 0
+        if args.sensitivity_command == "effort-compare":
+            from eval.analysis.sensitivity_effort import (
+                DEFAULT_COMPARE_EXCLUSIONS, run_compare)
+            exclusions = (
+                DEFAULT_COMPARE_EXCLUSIONS if args.exclude_setting is None
+                else tuple(args.exclude_setting))
+            result = run_compare(dict(args.arm), args.out, exclusions)
             print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
             return 0
         raise AssertionError(args.sensitivity_command)

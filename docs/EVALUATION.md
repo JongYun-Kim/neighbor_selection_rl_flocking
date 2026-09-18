@@ -200,10 +200,40 @@ different checkpoint kind.
 
 Sensitivity episodes use compact artifacts containing the scalar series,
 outcome, and metadata needed for C2 summaries and paired comparisons. They do
-not record full state, action, or control trajectories; use the population suite
-when radius, heatmap, or control-effort analysis is required. The sensitivity
-bundle writes `settings.csv`, `episodes.csv`, `aggregate.csv`,
-`paired_vs_acs.csv`, and `dominance.csv` under `summaries/`.
+not record full state, action, or per-agent control trajectories, but they do
+record three per-policy-step control diagnostics: the agent-mean `|u|`
+(`mean_abs_control`), the agent-max `|u|` (`max_abs_control`), and the fraction
+of agents at the turn-rate cap (`control_saturation_fraction`). L1, peak and
+saturation effort are therefore available post hoc from a sensitivity bundle
+through `python -m eval.analysis.sensitivity_effort` (below); L2 / per-agent /
+radius / heatmap analysis still requires the population suite. **L2 is not
+recoverable here at all**: only the per-step mean of `|u|` is stored, so
+`mean(u^2)` cannot be reconstructed from it, and that module emits no `l2_*` or
+`rms_*` column by design. The sensitivity bundle writes `settings.csv`,
+`episodes.csv`, `aggregate.csv`, `paired_vs_acs.csv`, and `dominance.csv` under
+`summaries/`.
+
+`sensitivity_effort compute` writes `episode_sensitivity_effort.csv`,
+`setting_effort.csv`, `event_aligned.csv`, `paired_vs_pure_acs.csv` and
+`sensitivity_effort_manifest.json` into `<bundle>/analysis/control_effort/`.
+`mean_abs_control` is the population lane's `l1_rate` only while
+`substeps_per_policy_interval == 1`, so an episode that breaks that identity is
+refused rather than warned about, and the integral uses
+`policy_interval_seconds` as dt. Pairing against PureACS is done within one arm,
+where the initial states are shared per (setting, seed). `compare` puts two arms
+side by side with the arm, run id and checkpoint hash on every row, but
+different checkpoints are **not a controlled comparison** — they also differ in
+reward and observation channels — so it emits no cross-arm delta or
+percent-change column and says so in `compare_manifest.json` and in every figure
+title.
+
+```bash
+python -m eval.analysis.sensitivity_effort compute \
+    --run test_results/evaluation/<run-id>/sensitivity --arm dknn
+python -m eval.analysis.sensitivity_effort compare \
+    --arm dknn=<episode_sensitivity_effort.csv> \
+    --arm full_NN=<episode_sensitivity_effort.csv> --out <dir>
+```
 
 All maintained sensitivity settings are judged offline with `main_c2_v1`, but
 they are diagnostic results, not the official confirmation lane. In the refined
